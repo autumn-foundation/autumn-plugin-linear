@@ -31,6 +31,7 @@ san-mateo-camel = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tracing = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
 
 [lints.rust]

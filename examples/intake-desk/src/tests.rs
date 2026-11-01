@@ -49,9 +49,18 @@ fn the_rule_routes_by_words() {
 
 #[test]
 fn the_receipt_id_is_stable_per_issue() {
-    assert_eq!(stable_uuid(&receipt_key("i-1")), stable_uuid(&receipt_key("i-1")));
-    assert_ne!(stable_uuid(&receipt_key("i-1")), stable_uuid(&receipt_key("i-2")));
-    let body = receipt_body(&Routing { queue: "bug".into(), priority: 2 });
+    assert_eq!(
+        stable_uuid(&receipt_key("i-1")),
+        stable_uuid(&receipt_key("i-1"))
+    );
+    assert_ne!(
+        stable_uuid(&receipt_key("i-1")),
+        stable_uuid(&receipt_key("i-2"))
+    );
+    let body = receipt_body(&Routing {
+        queue: "bug".into(),
+        priority: 2,
+    });
     assert!(body.contains("**bug**") && body.contains('2'), "{body}");
 }
 
@@ -77,6 +86,11 @@ async fn events_without_the_intake_label_are_skipped() {
         .data(json!({"id": "c-1"}))
         .at_ms(now);
     assert_eq!(deliver(&app, &comment.sign("s", "d-2")).await, 200);
+    // Another workspace: skipped, because the route fixes one connection.
+    let other = EventFixture::new("Issue", "create", "other-org")
+        .data(json!({"id": "i-3", "labelIds": [INTAKE_LABEL]}))
+        .at_ms(now);
+    assert_eq!(deliver(&app, &other.sign("s", "d-4")).await, 200);
     // With the label, the handler calls camel. No route: 503, so Linear retries.
     let create = EventFixture::new("Issue", "create", ORG)
         .data(json!({"id": "i-2", "labelIds": [INTAKE_LABEL]}))
@@ -100,15 +114,25 @@ async fn an_existing_receipt_is_not_posted_again() {
     let issue_id = format!("i-{}", OsEntropy.hex(8));
     let fake = MemoryTransport::new();
     let earlier = json!({"id": stable_uuid(&receipt_key(&issue_id))});
-    fake.reply("POST", GRAPHQL_URL, data(&json!({"issue": issue_node(&issue_id)})));
-    fake.reply("POST", GRAPHQL_URL, data(&json!({"comments": {"nodes": [earlier]}})));
+    fake.reply(
+        "POST",
+        GRAPHQL_URL,
+        data(&json!({"issue": issue_node(&issue_id)})),
+    );
+    fake.reply(
+        "POST",
+        GRAPHQL_URL,
+        data(&json!({"comments": {"nodes": [earlier]}})),
+    );
     fake.reply(
         "POST",
         GRAPHQL_URL,
         data(&json!({"issueUpdate": {"success": true, "issue": issue_node(&issue_id)}})),
     );
     let scenario = Scenario { issue_id, fake };
-    let err = run(&url, &scenario).await.expect_err("the check sees no new receipt");
+    let err = run(&url, &scenario)
+        .await
+        .expect_err("the check sees no new receipt");
     let err = err.to_string();
     assert!(err.starts_with("check failed:"), "{err}");
     // The message is "the summary {actual} is not {expected}".
@@ -131,12 +155,7 @@ async fn a_rate_limit_is_retried_by_harvest() {
             &json!({"errors": [{"message": "Rate limit exceeded", "extensions": {"code": "RATELIMITED"}}]}),
         ),
     );
-    for reply in [
-        data(&json!({"issue": issue_node(&issue_id)})),
-        data(&json!({"comments": {"nodes": []}})),
-        data(&json!({"commentCreate": {"success": true, "comment": {"id": stable_uuid(&receipt_key(&issue_id))}}})),
-        data(&json!({"issueUpdate": {"success": true, "issue": issue_node(&issue_id)}})),
-    ] {
+    for reply in happy_replies(&issue_id) {
         fake.reply("POST", GRAPHQL_URL, reply);
     }
     let scenario = Scenario { issue_id, fake };
@@ -146,7 +165,10 @@ async fn a_rate_limit_is_retried_by_harvest() {
     assert!(err.starts_with("check failed:"), "{err}");
     let actual = err.split(" is not ").next().unwrap_or_default();
     assert!(actual.contains(r#""receipt_created":true"#), "{err}");
-    assert!(actual.contains(r#"["AutumnIssue","AutumnIssue","AutumnFindComment""#), "{err}");
+    assert!(
+        actual.contains(r#"["AutumnIssue","AutumnIssue","AutumnFindComment""#),
+        "{err}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -155,18 +177,100 @@ async fn a_graphql_error_fails_the_workflow_with_no_retry() {
     let _guard = DB_LOCK.lock().await;
     let issue_id = format!("i-{}", OsEntropy.hex(8));
     let fake = MemoryTransport::new();
-    fake.reply(
-        "POST",
-        GRAPHQL_URL,
-        data_error("Entity not found: Issue"),
-    );
-    let scenario = Scenario { issue_id, fake: fake.clone() };
+    fake.reply("POST", GRAPHQL_URL, data_error("Entity not found: Issue"));
+    let scenario = Scenario {
+        issue_id,
+        fake: fake.clone(),
+    };
     let err = run(&url, &scenario).await.expect_err("the workflow fails");
     let err = err.to_string();
-    assert!(err.starts_with("workflow intake-"), "{err}");
+    assert!(err.starts_with(&format!("workflow intake-{ORG}-")), "{err}");
     assert_eq!(fake.requests_to(GRAPHQL_URL).len(), 1, "{err}");
 }
 
 fn data_error(message: &str) -> HttpResponse {
     HttpResponse::json(200, &json!({"errors": [{"message": message}]}))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_http_429_is_retried_by_harvest() {
+    let Some(url) = database_url() else { return };
+    let _guard = DB_LOCK.lock().await;
+    let issue_id = format!("i-{}", OsEntropy.hex(8));
+    let fake = MemoryTransport::new();
+    // Linear documents 429 with RATELIMITED and Retry-After.
+    let mut limited = HttpResponse::json(
+        429,
+        &json!({"errors": [{"message": "Rate limit exceeded", "extensions": {"code": "RATELIMITED"}}]}),
+    );
+    limited
+        .headers
+        .push(("retry-after".to_owned(), "1".to_owned()));
+    fake.reply("POST", GRAPHQL_URL, limited);
+    for reply in happy_replies(&issue_id) {
+        fake.reply("POST", GRAPHQL_URL, reply);
+    }
+    let scenario = Scenario { issue_id, fake };
+    let err = run(&url, &scenario).await.expect_err("one extra call");
+    let actual = err.to_string();
+    let actual = actual
+        .split(" is not ")
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(actual.contains(r#""receipt_created":true"#), "{err}");
+    assert!(
+        actual.contains(r#"["AutumnIssue","AutumnIssue","AutumnFindComment""#),
+        "{err}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_create_finds_the_receipt_an_earlier_attempt_made() {
+    let Some(url) = database_url() else { return };
+    let _guard = DB_LOCK.lock().await;
+    let issue_id = format!("i-{}", OsEntropy.hex(8));
+    let receipt = json!({"id": stable_uuid(&receipt_key(&issue_id))});
+    let fake = MemoryTransport::new();
+    fake.reply(
+        "POST",
+        GRAPHQL_URL,
+        data(&json!({"issue": issue_node(&issue_id)})),
+    );
+    fake.reply(
+        "POST",
+        GRAPHQL_URL,
+        data(&json!({"comments": {"nodes": []}})),
+    );
+    // The create of a known id fails. The second find sees the comment.
+    fake.reply(
+        "POST",
+        GRAPHQL_URL,
+        data_error("Comment with this id already exists"),
+    );
+    fake.reply(
+        "POST",
+        GRAPHQL_URL,
+        data(&json!({"comments": {"nodes": [receipt]}})),
+    );
+    fake.reply(
+        "POST",
+        GRAPHQL_URL,
+        data(&json!({"issueUpdate": {"success": true, "issue": issue_node(&issue_id)}})),
+    );
+    let scenario = Scenario { issue_id, fake };
+    let err = run(&url, &scenario)
+        .await
+        .expect_err("the check sees no new receipt");
+    let actual = err.to_string();
+    let actual = actual
+        .split(" is not ")
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(actual.contains(r#""receipt_created":false"#), "{err}");
+    assert!(
+        actual.contains(r#""AutumnCommentCreate","AutumnFindComment","AutumnIssueUpdate""#),
+        "{err}"
+    );
 }

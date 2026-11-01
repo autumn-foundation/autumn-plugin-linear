@@ -27,6 +27,25 @@
 //! starts one workflow. A retry of `post_receipt` first looks for its
 //! comment by a stable id, so Linear gets one comment.
 //!
+//! Failures:
+//!
+//! - A transient error (429, 5xx, a network error) retries with backoff:
+//!   8 attempts per activity, up to about a minute. Camel drops the
+//!   `Retry-After` value, so the backoff does not follow it.
+//! - A permanent error (a GraphQL error, a refused token) ends the run
+//!   FAILED. One run per issue: a later delivery for the issue attaches to
+//!   that run. Re-drive a FAILED run with the harvest reset path, or add a
+//!   reconciler. A mesh needs one of the two.
+//! - The example serves one workspace. The handler skips events from other
+//!   workspaces, because the camel route fixes one San Mateo connection.
+//!   For many workspaces, map the signed `organizationId` to a connection
+//!   on the server side, never from a header.
+//! - The harvest hand-off has a 4 s budget (`ackTimeout`), under Linear's
+//!   5 s. A slow hand-off gives 503, and Linear retries.
+//! - Production also needs a connector dead-letter sink
+//!   (`PostgresDeadLetterSink`, with the harvest plugin migrations), so a
+//!   bad message is recorded and not refused forever.
+//!
 //! `MemoryTransport` is the fake Linear API. For production: remove
 //! `.transport(..)`, use `PgStore` in San Mateo, connect the workspace with a
 //! San Mateo connect session, serve the autumn app with `.run()`, and point
@@ -70,7 +89,9 @@ use camel_api::CamelError;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_direct::DirectComponent;
 use camel_core::{CamelContext, RouteDefinition};
-use harvest_camel::{CamelHandle, HarvestBridge, call_route, call_route_from_activity, check_route};
+use harvest_camel::{
+    CamelHandle, HarvestBridge, call_route, call_route_from_activity, check_route,
+};
 use san_mateo::clock::{Entropy, OsEntropy};
 use san_mateo::credentials::OAuth2Credentials;
 use san_mateo::transport::HttpResponse;
@@ -87,6 +108,13 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// The longest time for the scenario. CI must not hang.
 const RUN_TIMEOUT: Duration = Duration::from_secs(120);
+/// The longest wait for the workflow. It is shorter than the run budget,
+/// so that the normal path always stops every part.
+const WORKFLOW_TIMEOUT: Duration = Duration::from_secs(60);
+/// Attempts per activity for a transient error.
+const ATTEMPTS: u32 = 8;
+/// The first backoff. It doubles on each attempt.
+const BACKOFF: Duration = Duration::from_millis(500);
 
 const ENV: &str = "dev";
 /// The San Mateo integration key. It uses the built-in `linear` provider.
@@ -154,7 +182,7 @@ fn receipt_body(routing: &Routing) -> String {
 
 /// The work key of the receipt. Each retry derives the same comment id.
 fn receipt_key(issue_id: &str) -> String {
-    format!("intake-desk:receipt:{issue_id}")
+    format!("intake-desk:receipt:{ORG}:{issue_id}")
 }
 
 // ─────────────────────────── harvest: workflow ───────────────────────────
@@ -188,14 +216,14 @@ async fn intake_issue(ctx: &WorkflowContext, input: Value) -> Result<Value, Stri
 }
 
 /// Read the issue fresh: the webhook data can be old by now.
-#[activity(start_to_close = "30s", retry = RetryPolicy::exponential(3, Duration::from_millis(200)))]
+#[activity(start_to_close = "30s", retry = RetryPolicy::exponential(ATTEMPTS, BACKOFF))]
 async fn fetch_issue(ctx: &ActivityContext, input: Value) -> Result<Value, ActivityFailure> {
     let issue_id = text(&input, "issue_id")?;
     run_op(ctx, &ops::issue(issue_id)).await
 }
 
 /// Post the receipt one time. A retry finds the comment by its stable id.
-#[activity(start_to_close = "30s", retry = RetryPolicy::exponential(3, Duration::from_millis(200)))]
+#[activity(start_to_close = "30s", retry = RetryPolicy::exponential(ATTEMPTS, BACKOFF))]
 async fn post_receipt(ctx: &ActivityContext, input: Value) -> Result<Value, ActivityFailure> {
     let issue_id = text(&input, "issue_id")?;
     let routing: Routing = serde_json::from_value(input["routing"].clone())
@@ -206,12 +234,23 @@ async fn post_receipt(ctx: &ActivityContext, input: Value) -> Result<Value, Acti
         return Ok(json!({"id": comment.id, "created": false}));
     }
     let input = CommentCreate::new(issue_id, receipt_body(&routing)).with_stable_id(&key);
-    let comment: Comment = run_op(ctx, &ops::create_comment(&input)).await?;
-    Ok(json!({"id": comment.id, "created": true}))
+    match run_op::<Comment>(ctx, &ops::create_comment(&input)).await {
+        Ok(comment) => Ok(json!({"id": comment.id, "created": true})),
+        Err(failure) => {
+            // A lost reply or an overlapping attempt can have made the
+            // comment. Linear then refuses the second create of its id.
+            let again: Connection<Comment> =
+                run_op(ctx, &ops::find_comment(&stable_uuid(&key))).await?;
+            match again.nodes.into_iter().next() {
+                Some(comment) => Ok(json!({"id": comment.id, "created": false})),
+                None => Err(failure),
+            }
+        }
+    }
 }
 
 /// Set the priority. A second run sets the same value.
-#[activity(start_to_close = "30s", retry = RetryPolicy::exponential(3, Duration::from_millis(200)))]
+#[activity(start_to_close = "30s", retry = RetryPolicy::exponential(ATTEMPTS, BACKOFF))]
 async fn set_priority(ctx: &ActivityContext, input: Value) -> Result<Value, ActivityFailure> {
     let issue_id = text(&input, "issue_id")?;
     let routing: Routing = serde_json::from_value(input["routing"].clone())
@@ -259,7 +298,9 @@ fn text<'a>(input: &'a Value, field: &str) -> Result<&'a str, ActivityFailure> {
 /// harvest, and returns after harvest holds it.
 fn intake_handler(
     camel: CamelHandle,
-) -> impl Fn(WebhookContext) -> std::pin::Pin<Box<dyn Future<Output = autumn_web::AutumnResult<()>> + Send>>
+) -> impl Fn(
+    WebhookContext,
+) -> std::pin::Pin<Box<dyn Future<Output = autumn_web::AutumnResult<()>> + Send>>
 + Send
 + Sync
 + 'static {
@@ -267,6 +308,11 @@ fn intake_handler(
         let camel = camel.clone();
         Box::pin(async move {
             if !ctx.event.label_added(INTAKE_LABEL) {
+                return Ok(());
+            }
+            // One workspace: the camel route fixes its San Mateo connection.
+            if ctx.event.organization_id.as_str() != ORG {
+                tracing::warn!(org = %ctx.event.organization_id, "intake desk: event from another workspace; skipped");
                 return Ok(());
             }
             let issue = ctx
@@ -283,8 +329,10 @@ fn intake_handler(
                 .await
                 .map_err(|err| {
                     // Not 2xx: Linear sends the webhook again later.
-                    AutumnError::internal_server_error_msg(format!("harvest did not take the issue: {err}"))
-                        .with_status(autumn_web::reexports::http::StatusCode::SERVICE_UNAVAILABLE)
+                    AutumnError::internal_server_error_msg(format!(
+                        "harvest did not take the issue: {err}"
+                    ))
+                    .with_status(autumn_web::reexports::http::StatusCode::SERVICE_UNAVAILABLE)
                 })?;
             Ok(())
         })
@@ -306,7 +354,12 @@ async fn deliver(app: &TestClient, signed: &SignedEvent) -> u16 {
     for (name, value) in &signed.headers {
         request = request.header(name, value);
     }
-    request.body(signed.body.clone()).send().await.status.as_u16()
+    request
+        .body(signed.body.clone())
+        .send()
+        .await
+        .status
+        .as_u16()
 }
 
 // ─────────────────────────── camel: the routes ───────────────────────────
@@ -315,7 +368,9 @@ async fn deliver(app: &TestClient, signed: &SignedEvent) -> u16 {
 fn routes() -> Result<Vec<RouteDefinition>, CamelError> {
     let intake = RouteBuilder::from(INTAKE)
         .route_id("linear-intake")
-        .to(format!("harvest:{STREAM}?idHeader={MESSAGE_ID}"))
+        .to(format!(
+            "harvest:{STREAM}?idHeader={MESSAGE_ID}&ackTimeout=4000"
+        ))
         .build()?;
     // The URI fixes the connection. `allowHeaderOverrides` stays `false`,
     // so a header cannot change the workspace.
@@ -335,7 +390,10 @@ async fn san_mateo(fake: &MemoryTransport) -> Result<SanMateo, BoxError> {
     let mut key = [0_u8; 32];
     OsEntropy.fill(&mut key);
     let san = SanMateo::builder()
-        .environment(EnvironmentConfig::new(ENV, format!("sk_example_{}", OsEntropy.hex(16))))
+        .environment(EnvironmentConfig::new(
+            ENV,
+            format!("sk_example_{}", OsEntropy.hex(16)),
+        ))
         .key_ring(KeyRing::new("k1", key)?)
         .catalog(Catalog::builtin()?)
         .transport(Arc::new(fake.clone()))
@@ -394,23 +452,24 @@ fn issue_node(issue_id: &str) -> Value {
     })
 }
 
-/// The fake Linear API for a happy run: the issue, no receipt yet, the new
-/// receipt, the updated issue.
+/// The replies of a happy run: the issue, no receipt yet, the new receipt,
+/// the updated issue.
+fn happy_replies(issue_id: &str) -> Vec<HttpResponse> {
+    let receipt = json!({"id": stable_uuid(&receipt_key(issue_id)), "body": "Intake desk: ..."});
+    vec![
+        data(&json!({"issue": issue_node(issue_id)})),
+        data(&json!({"comments": {"nodes": []}})),
+        data(&json!({"commentCreate": {"success": true, "comment": receipt}})),
+        data(&json!({"issueUpdate": {"success": true, "issue": issue_node(issue_id)}})),
+    ]
+}
+
+/// The fake Linear API for a happy run.
 fn fake_linear(issue_id: &str) -> MemoryTransport {
     let fake = MemoryTransport::new();
-    let receipt = json!({"id": stable_uuid(&receipt_key(issue_id)), "body": "Intake desk: ..."});
-    fake.reply("POST", GRAPHQL_URL, data(&json!({"issue": issue_node(issue_id)})));
-    fake.reply("POST", GRAPHQL_URL, data(&json!({"comments": {"nodes": []}})));
-    fake.reply(
-        "POST",
-        GRAPHQL_URL,
-        data(&json!({"commentCreate": {"success": true, "comment": receipt}})),
-    );
-    fake.reply(
-        "POST",
-        GRAPHQL_URL,
-        data(&json!({"issueUpdate": {"success": true, "issue": issue_node(issue_id)}})),
-    );
+    for reply in happy_replies(issue_id) {
+        fake.reply("POST", GRAPHQL_URL, reply);
+    }
     fake
 }
 
@@ -484,7 +543,11 @@ async fn with_harvest(
     let runner = HarvestRunner::start(
         autumn_harvest::HarvestBuilder::new()
             .workflows(vec![intake_issue_info()])
-            .activities(vec![fetch_issue_info(), post_receipt_info(), set_priority_info()])
+            .activities(vec![
+                fetch_issue_info(),
+                post_receipt_info(),
+                set_priority_info(),
+            ])
             .state(activities)
             .build(),
         &HarvestRuntimeConfig {
@@ -505,8 +568,11 @@ async fn with_harvest(
     api.install(runner.api_runtime());
     let binding = SourceBinding::starts("linear-intake", STREAM, "intake_issue").map_json(
         |_ctx, message: Value| {
+            let org = message["organization_id"]
+                .as_str()
+                .ok_or("missing organization_id")?;
             let id = message["issue_id"].as_str().ok_or("missing issue_id")?;
-            Ok::<_, &str>(MappedMessage::new(format!("intake-{id}"), message))
+            Ok::<_, &str>(MappedMessage::new(workflow_id(org, id), message))
         },
     );
     let connector = ConnectorRuntime::for_binding(
@@ -524,10 +590,12 @@ async fn with_harvest(
 
     let result = deliver_and_wait(camel, pool, url, scenario).await;
 
-    // Stop in all cases: the connector, then the worker.
+    // Stop in all cases: the connector, then the worker. A connector panic
+    // must not skip the worker stop.
     cancel.cancel();
-    connector.await?;
+    let joined = connector.await;
     runner.stop().await;
+    joined?;
     result
 }
 
@@ -549,7 +617,9 @@ async fn deliver_and_wait(
         "title": "Checkout crash after the update",
         "labelIds": [INTAKE_LABEL],
     });
-    let create = EventFixture::new("Issue", "create", ORG).data(issue).at_ms(now);
+    let create = EventFixture::new("Issue", "create", ORG)
+        .data(issue)
+        .at_ms(now);
     let other = EventFixture::new("Issue", "update", ORG)
         .data(json!({"id": "i-other", "labelIds": []}))
         .updated_from(json!({"title": "old"}))
@@ -560,7 +630,11 @@ async fn deliver_and_wait(
         // A forged signature.
         deliver(&app, &create.sign("not-the-secret", &d1)).await,
         // An update that does not add the label: the handler skips it.
-        deliver(&app, &other.sign(&secret, &format!("d-{}", OsEntropy.hex(8)))).await,
+        deliver(
+            &app,
+            &other.sign(&secret, &format!("d-{}", OsEntropy.hex(8))),
+        )
+        .await,
         // The intake event.
         deliver(&app, &create.sign(&secret, &d1)).await,
         // A retry with a new delivery id: the same workflow.
@@ -569,7 +643,7 @@ async fn deliver_and_wait(
         deliver(&app, &create.sign(&secret, &d1)).await,
     ];
 
-    let workflow_id = format!("intake-{}", scenario.issue_id);
+    let workflow_id = workflow_id(ORG, &scenario.issue_id);
     let mut conn = pool.get().await?;
     let execution = resolve_execution_id_by_workflow_id(&mut conn, "intake_issue", &workflow_id)
         .await?
@@ -577,10 +651,15 @@ async fn deliver_and_wait(
     drop(conn);
     let output = WorkflowHandleClient::single(pool.clone(), url)
         .handle(execution.exec_id)
-        .result_raw_with_timeout(RUN_TIMEOUT)
+        .result_raw_with_timeout(WORKFLOW_TIMEOUT)
         .await
         .map_err(|e| format!("workflow {workflow_id}: {e}"))?;
     Ok(summarize(&output, &statuses, &scenario.fake))
+}
+
+/// The workflow id: one run per workspace and issue.
+fn workflow_id(org: &str, issue_id: &str) -> String {
+    format!("intake-{org}-{issue_id}")
 }
 
 /// The wall clock in Unix ms. The autumn app checks the webhook time
@@ -609,11 +688,32 @@ fn summarize(output: &Value, statuses: &[u16], fake: &MemoryTransport) -> Value 
     let auth = calls
         .iter()
         .all(|call| call.header_value("authorization") == Some(&format!("Bearer {ACCESS_TOKEN}")));
+    let bodies: Vec<Value> = calls
+        .iter()
+        .map(|call| serde_json::from_slice(&call.body).unwrap_or_default())
+        .collect();
+    let input_of = |name: &str| {
+        bodies
+            .iter()
+            .find(|b| b["query"].as_str().is_some_and(|q| q.contains(name)))
+            .map(|b| b["variables"].clone())
+            .unwrap_or_default()
+    };
+    let create = input_of("commentCreate(");
+    let update = input_of("issueUpdate(");
     json!({
         "workflow": output,
         "webhook_statuses": statuses,
         "linear_operations": operations,
         "auth_added_by_san_mateo": auth,
+        "sent": {
+            "issue": input_of("issue(id")["id"],
+            "find_comment_id": input_of("comments(")["id"],
+            "comment_id": create["input"]["id"],
+            "comment_issue": create["input"]["issueId"],
+            "update_issue": update["id"],
+            "update_priority": update["input"]["priority"],
+        },
     })
 }
 
@@ -631,11 +731,21 @@ fn check(summary: &Value, scenario: &Scenario) -> Result<(), String> {
         "webhook_statuses": [401, 200, 200, 200, 200],
         "linear_operations": ["AutumnIssue", "AutumnFindComment", "AutumnCommentCreate", "AutumnIssueUpdate"],
         "auth_added_by_san_mateo": true,
+        "sent": {
+            "issue": scenario.issue_id,
+            "find_comment_id": stable_uuid(&receipt_key(&scenario.issue_id)),
+            "comment_id": stable_uuid(&receipt_key(&scenario.issue_id)),
+            "comment_issue": scenario.issue_id,
+            "update_issue": scenario.issue_id,
+            "update_priority": 1,
+        },
     });
     if *summary == expected {
         Ok(())
     } else {
-        Err(format!("check failed: the summary {summary} is not {expected}"))
+        Err(format!(
+            "check failed: the summary {summary} is not {expected}"
+        ))
     }
 }
 
