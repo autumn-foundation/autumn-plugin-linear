@@ -1,0 +1,4 @@
+# clippy config for autumn-plugin-linear
+
+# The OAuth callback reads linearly.
+cognitive-complexity-threshold = 30

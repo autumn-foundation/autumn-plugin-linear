@@ -1,0 +1,108 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: test
+        run: cargo test --locked --all-targets --all-features
+      - name: doc tests
+        run: cargo test --locked --doc
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+          components: clippy
+      - name: clippy (MSRV 1.88)
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: coverage (fail under 85 % lines)
+        run: cargo llvm-cov --locked --all-features --fail-under-lines 85
+
+  verus:
+    runs-on: ubuntu-latest
+    env:
+      # The same pinned build as san-mateo: Verus from source, z3 from PyPI.
+      VERUS_REV: 2c9bf54cfa6391ee3769f23d8d173b96a0b70560
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/verus-src/source/target-verus
+          key: verus-${{ env.VERUS_REV }}
+      # Build Verus outside the repo: in the repo, cargo takes it as part of
+      # this package.
+      - name: Build Verus
+        run: |
+          set -eu
+          mkdir -p "$HOME/verus-src" && cd "$HOME/verus-src"
+          git init -q
+          git fetch -q --depth 1 https://github.com/verus-lang/verus "$VERUS_REV"
+          git checkout -q FETCH_HEAD
+          pip download -q --no-deps z3-solver==4.16.0.0 -d /tmp/z3
+          python3 -m zipfile -e /tmp/z3/*.whl /tmp/z3/x
+          cp /tmp/z3/x/z3_solver-4.16.0.0.data/data/bin/z3 source/z3
+          chmod +x source/z3
+          cd source
+          rustup toolchain install
+          bash -c 'source ../tools/activate && vargo build --release'
+      - name: Verify the policy spec
+        run: |
+          VERUS_Z3_PATH="$HOME/verus-src/source/z3" \
+            "$HOME/verus-src/source/target-verus/release/verus" verus/policy.rs
+
+  intake-desk:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: intake
+          POSTGRES_PASSWORD: intake
+          POSTGRES_DB: intake
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U intake"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      INTAKE_DESK_TEST_DATABASE_URL: postgres://intake:intake@localhost:5432/intake
+      DATABASE_URL: postgres://intake:intake@localhost:5432/intake
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: libpq
+        run: sudo apt-get update && sudo apt-get install -y libpq-dev
+      - name: fmt
+        run: cargo fmt --manifest-path examples/intake-desk/Cargo.toml --check
+      - name: clippy
+        run: cargo clippy --locked --manifest-path examples/intake-desk/Cargo.toml --all-targets -- -D warnings
+      - name: test
+        run: cargo test --locked --manifest-path examples/intake-desk/Cargo.toml
+      - name: run
+        run: cargo run --locked --manifest-path examples/intake-desk/Cargo.toml
