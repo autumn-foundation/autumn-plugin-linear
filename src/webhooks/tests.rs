@@ -132,7 +132,7 @@ async fn an_event_with_no_handler_is_200_and_runs_nothing() {
     send(&state, &comment.sign(SECRET, "d-4"))
         .await
         .assert_status(200);
-    assert!(handled(&seen).is_empty());
+    assert_eq!(handled(&seen), Vec::<String>::new());
 }
 
 #[tokio::test]
@@ -155,7 +155,7 @@ async fn signature_failures_are_401_before_any_parsing() {
     // A body that is not JSON and no valid signature: 401, not 400.
     let garbage = SignedEvent::new("wrong", b"not json".to_vec(), "d-5", "Issue", NOW_MS);
     send(&state, &garbage).await.assert_status(401);
-    assert!(handled(&seen).is_empty());
+    assert_eq!(handled(&seen), Vec::<String>::new());
 }
 
 #[tokio::test]
@@ -267,7 +267,7 @@ async fn a_missing_delivery_id_or_a_bad_envelope_is_400() {
         NOW_MS,
     );
     send(&state, &no_org).await.assert_status(400);
-    assert!(handled(&seen).is_empty());
+    assert_eq!(handled(&seen), Vec::<String>::new());
 }
 
 #[tokio::test]
@@ -434,7 +434,7 @@ async fn a_store_failure_is_500_and_runs_nothing() {
     send(&state, &issue("create").sign(SECRET, "d-23"))
         .await
         .assert_status(500);
-    assert!(handled(&seen).is_empty());
+    assert_eq!(handled(&seen), Vec::<String>::new());
 }
 
 #[tokio::test]
@@ -502,7 +502,7 @@ async fn a_revoke_keeps_a_token_from_a_later_install() {
         .await
         .assert_status(200);
     assert!(stored(&state).await.is_some(), "the later install stays");
-    assert!(handled(&seen).is_empty());
+    assert_eq!(handled(&seen), Vec::<String>::new());
 }
 
 #[test]
