@@ -10,7 +10,8 @@ Linear retries a failed delivery up to 3 times (1 min, 1 h, 6 h). It sends
 retry keeps the same value. The header is not signed. Linear waits 5 s
 for a 200.
 
-An agent mesh must not lose an issue and must not act two times on it.
+An app that acts on issues must not lose one and must not act two times
+on it.
 
 ## Decision
 

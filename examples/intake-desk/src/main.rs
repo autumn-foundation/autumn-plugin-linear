@@ -35,7 +35,7 @@
 //! - A permanent error (a GraphQL error, a refused token) ends the run
 //!   FAILED. One run per issue: a later delivery for the issue attaches to
 //!   that run. Re-drive a FAILED run with the harvest reset path, or add a
-//!   reconciler. A mesh needs one of the two.
+//!   reconciler. A production app needs one of the two.
 //! - The example serves one workspace. The handler skips events from other
 //!   workspaces, because the camel route fixes one San Mateo connection.
 //!   For many workspaces, map the signed `organizationId` to a connection
@@ -140,8 +140,7 @@ const ACCESS_TOKEN: &str = "lin-oauth-example";
 
 // ───────────────────────────── the triage rule ─────────────────────────────
 
-/// Where an issue goes. In an agent mesh, this is where a dispatcher picks
-/// a worker. Here it is a fixed rule, so the workflow stays deterministic.
+/// Where an issue goes. A fixed rule keeps the workflow deterministic.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Routing {
     queue: String,

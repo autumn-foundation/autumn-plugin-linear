@@ -8,8 +8,7 @@ Give an Autumn app a safe, general Linear integration:
 - Install the app on a Linear workspace with OAuth and keep its token fresh.
 - Call the Linear GraphQL API with rate-limit-aware retries.
 
-The long-term use case is Linear as the issue intake layer for a mesh of
-agents. The plugin stays general. The design keeps these needs in view:
+The design keeps these needs of production apps in view:
 
 - Fast acknowledgement (Linear waits 5 s) and a durable hand-off.
 - Idempotent write-back (comments, issue updates, agent activities).
@@ -149,7 +148,7 @@ Not stated by Linear, so the plugin does not depend on it:
 - **Green (ideas).** Derive the PKCE verifier from the nonce, so the
   flow stays stateless. Give `create_comment` a client id derived from the
   work key, so a retry is a no-op. Expose `promptContext` and the stop
-  signal for agent loops.
+  signal for apps that answer agent sessions.
 - **Blue (process).** Spec the policy core first (Verus), then RED tests
   per module, then GREEN, then refactor. Review from five angles. Map each
   AC to evidence in `docs/acceptance.md`.
