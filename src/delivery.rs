@@ -49,8 +49,8 @@ pub trait DeliveryStore: Send + Sync + 'static {
 /// size limit.
 #[derive(Debug)]
 pub struct InMemoryDeliveryStore {
-    window_ms: u64,
-    lease_ms: u64,
+    pub(crate) window_ms: u64,
+    pub(crate) lease_ms: u64,
     pub(crate) capacity: usize,
     inner: Mutex<Claims>,
 }
@@ -68,8 +68,10 @@ impl Default for InMemoryDeliveryStore {
 }
 
 impl InMemoryDeliveryStore {
-    /// Make a store with a window (ms) and a capacity (claims). The store
-    /// changes a capacity of zero to one.
+    /// Make a store with a window (ms) and a capacity (claims).
+    ///
+    /// The store changes a capacity of zero to one. The window drops done
+    /// claims; it never drops a claim that still runs inside its lease.
     #[must_use]
     pub fn new(window_ms: u64, capacity: usize) -> Self {
         Self {
@@ -80,10 +82,11 @@ impl InMemoryDeliveryStore {
         }
     }
 
-    /// Set the lease of an in-flight claim, in ms.
+    /// Set the lease of an in-flight claim, in ms. The store changes a
+    /// lease of zero to 1 ms: two claims in one ms must not share a time.
     #[must_use]
     pub const fn with_lease_ms(mut self, lease_ms: u64) -> Self {
-        self.lease_ms = lease_ms;
+        self.lease_ms = if lease_ms == 0 { 1 } else { lease_ms };
         self
     }
 
@@ -123,7 +126,7 @@ impl InMemoryDeliveryStore {
     )]
     fn claim_now(&self, delivery_id: &str, now_ms: u64) -> Result<Claim> {
         let mut claims = self.lock()?;
-        claims.prune(now_ms.saturating_sub(self.window_ms));
+        claims.prune(now_ms.saturating_sub(self.window_ms), now_ms, self.lease_ms);
         let slot = claims
             .by_id
             .get(delivery_id)
@@ -133,10 +136,13 @@ impl InMemoryDeliveryStore {
         if answer != Claim::Fresh {
             return Ok(answer);
         }
-        while claims.by_id.len() >= self.capacity && !claims.by_id.contains_key(delivery_id) {
-            if !claims.pop_oldest() {
-                break;
-            }
+        if claims.by_id.len() >= self.capacity
+            && !claims.by_id.contains_key(delivery_id)
+            && !claims.evict_one(now_ms, self.lease_ms)
+        {
+            // Every claim still runs. A 409 makes Linear retry later; no
+            // running claim is lost.
+            return Ok(Claim::InFlight);
         }
         claims.by_id.insert(delivery_id.to_owned(), next);
         claims.order.push_back((delivery_id.to_owned(), now_ms));
@@ -202,9 +208,17 @@ impl Claims {
             .is_some_and(|slot| claimed_at(*slot) == Some(at))
     }
 
-    /// Drop claims made at or before `cutoff`.
-    fn prune(&mut self, cutoff: u64) {
-        while self.order.front().is_some_and(|(_, at)| *at <= cutoff) {
+    /// Drop claims made at or before `cutoff`. Stop at a claim that still
+    /// runs inside its lease: the window must not end a running claim.
+    fn prune(&mut self, cutoff: u64, now_ms: u64, lease_ms: u64) {
+        while let Some((id, at)) = self.order.front()
+            && *at <= cutoff
+        {
+            let running = self.is_live(id, *at)
+                && matches!(self.by_id.get(id), Some(Slot::Held { at }) if now_ms < *at || now_ms - *at < lease_ms);
+            if running {
+                break;
+            }
             self.pop_oldest();
         }
     }
@@ -223,9 +237,36 @@ impl Claims {
         }
     }
 
+    /// Drop the oldest claim that is done or past its lease. Returns
+    /// `false` when every claim still runs.
+    fn evict_one(&mut self, now_ms: u64, lease_ms: u64) -> bool {
+        let position = self.order.iter().position(|(id, at)| {
+            match self.by_id.get(id) {
+                Some(slot) if claimed_at(*slot) == Some(*at) => match slot {
+                    Slot::Held { at } => !(now_ms < *at || now_ms - *at < lease_ms),
+                    _ => true,
+                },
+                // A stale entry: drop it on the way.
+                _ => true,
+            }
+        });
+        let Some(position) = position else {
+            return false;
+        };
+        let stale_or_live = self.order.remove(position);
+        if let Some((id, at)) = stale_or_live
+            && self.is_live(&id, at)
+        {
+            self.by_id.remove(&id);
+            return true;
+        }
+        // The entry was stale; try the next one.
+        self.evict_one(now_ms, lease_ms)
+    }
+
     /// Drop the oldest entry. Returns `false` when there is none.
     ///
-    /// An entry is stale when its id was released or claimed again later.
+    /// An entry is stale after a release or a later claim of its id.
     /// A stale entry does not remove the live claim.
     fn pop_oldest(&mut self) -> bool {
         let Some((id, at)) = self.order.pop_front() else {

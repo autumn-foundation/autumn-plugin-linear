@@ -35,30 +35,41 @@ from the `autumn-web-0.9.0` sources.
 | Replay: body field `webhookTimestamp` (Unix ms). Reject when more than 60 s from now. | same |
 | Success is HTTP 200 within 5000 ms. Up to 3 retries: after 1 min, 1 h, 6 h. Linear can disable a failing webhook. | same |
 | Envelope fields: `action`, `type`, `actor`, `createdAt`, `data`, `url`, `updatedFrom`, `organizationId`, `webhookId`, `webhookTimestamp`. | same; schema `EntityWebhookPayload` |
-| `OAuthApp` `revoked` payload: `oauthClientId`, `organizationId`. | developers; schema `OAuthAppWebhookPayload` |
+| `OAuthApp` `revoked` payload: `oauthClientId`, `organizationId`, `createdAt: DateTime!` (the same on each retry). | developers; schema `OAuthAppWebhookPayload` |
 | `AgentSessionEvent` payload: `action` (`created`, `prompted`), `agentSession`, `agentActivity` (`content`, `signal`), `promptContext`, `guidance`, `previousComments`, `appUserId`, `oauthClientId`. | developers, "Agent interaction"; schema |
 | A `created` agent session needs an activity or an external URL within 10 s. | developers, "Agent interaction" |
+| The prompt text: the docs say `agentActivity.body`; the schema has `agentActivity.content.body`. The plugin reads both. | "Agent interaction"; schema `AgentActivityWebhookPayload` |
+| `agentSessionUpdate(id, input: {addedExternalUrls: [{label, url}]})`. | schema `AgentSessionUpdateInput`, `AgentSessionExternalUrlInput` |
+| `comments(filter: {id: {eq: ID}}, first: 1)` finds a comment by id. `comment(id)` returns `Comment!`, so a missing id is an error. | schema `CommentFilter`, `IDComparator`, `Query.comment` |
+| `issueCreate` and `agentActivityCreate` also take an optional `id` (UUID v4 format). | schema `IssueCreateInput`, `AgentActivityCreateInput` |
+| Rate-limit reset headers are UTC epoch ms: `X-RateLimit-Requests-Reset`. | developers, "Rate limiting" |
 | Activity types: `thought`, `elicitation`, `action`, `response`, `error` (`prompt` is user-only). Signals: `auth`, `continue`, `select`, `stop`. A `stop` signal means no more actions. | schema `AgentActivityType`, `AgentActivitySignal`; "Agent signals" |
 | `agentActivityCreate(input: {agentSessionId, content, signal, ephemeral, id})`. | schema |
 | GraphQL endpoint `https://api.linear.app/graphql`. API key: `Authorization: <key>`. OAuth: `Authorization: Bearer <token>`. | developers, "GraphQL" |
 | Errors come in `errors[]` with `message` and `extensions`. HTTP 200 can carry partial data and errors. | same |
 | Rate limit: HTTP 429, `extensions.code = RATELIMITED`, `Retry-After` in seconds. Headers `X-RateLimit-*` (reset in ms). | developers, "Rate limiting" |
 | Pagination: `first`/`after`, `pageInfo { hasNextPage endCursor }`, `nodes`. Default page 50. | developers, "Pagination" |
-| `issue(id)` takes a UUID or an identifier such as `ENG-123`. | developers, "GraphQL" |
+| `issue(id)` takes a UUID or an identifier such as `ENG-123` (the page shows `issue(id: "BLA-123")`). | developers, "GraphQL" |
 | `commentCreate(input: {issueId, body, id, parentId})`. `id` is optional and client-chosen. | schema `CommentCreateInput` |
 | `issueUpdate(id, input: {stateId, priority, assigneeId, delegateId, addedLabelIds, removedLabelIds, ...})`. | schema `IssueUpdateInput` |
 | `webhookCreate(input: {url, resourceTypes, teamId, allPublicTeams, secret, label})`, `webhookDelete(id)`. Needs `admin`. | schema; developers, "Webhooks" |
 | OAuth authorize `https://linear.app/oauth/authorize`: `client_id`, `redirect_uri`, `response_type=code`, `scope` (comma-separated), `state`, `prompt=consent`, `actor=user\|app`, PKCE `code_challenge` + `code_challenge_method=S256`. | developers, "OAuth 2.0" |
 | Token `POST https://api.linear.app/oauth/token`, form body. Code grant fields: `code`, `redirect_uri`, `client_id`, `client_secret`, `grant_type`, `code_verifier`. Response: `access_token`, `token_type`, `expires_in` (about 24 h), `scope`, `refresh_token`. | same |
 | Refresh: `grant_type=refresh_token`. Each refresh rotates the pair. A refresh has a 30 min grace period. Since 2026-04-01 all apps use refresh tokens. | same |
-| Scopes: `read`, `write`, `issues:create`, `comments:create`, `timeSchedule:write`, `admin`, `app:assignable`, `app:mentionable`. | same |
+| Scopes: `read`, `write`, `issues:create`, `comments:create`, `timeSchedule:write`, `admin`. The page names `app:assignable` and `app:mentionable` and documents them on the app page (not read). | same |
 | `scope` in the token response is a string for apps from 2023-12-01 on, an array before. | same |
 | Autumn `WebhookProvider::Generic` expects a `sha256=` prefix. It has no Linear preset and no body-timestamp check. | `autumn-web-0.9.0/src/webhook.rs` |
 | `TestApp::plugin` runs plugin startup hooks. | `autumn-web-0.9.0/src/test.rs` |
 | San Mateo has a built-in `linear` OAuth2 provider (proxy base `https://api.linear.app`). | `san-mateo/crates/san-mateo/providers/providers.yaml` |
 
-Not stated by Linear, so the plugin does not depend on it: whether a retry
-keeps the `Linear-Delivery` value. See ADR 0002.
+Not stated by Linear, so the plugin does not depend on it:
+
+- Whether a retry keeps the `Linear-Delivery` value. See ADR 0002.
+- The token endpoint error codes. The plugin follows RFC 6749 section 5.2:
+  `invalid_grant` means a dead grant; `invalid_client` means a bad app
+  secret.
+- That Linear does not run a rate-limited call. The plugin retries only an
+  answer with no `data`.
 
 ## Brainstorming (what can the plugin do?)
 
@@ -94,7 +105,7 @@ keeps the `Linear-Delivery` value. See ADR 0002.
 23. Webhook auto-subscription at install. Out: `create_webhook` is there
     for the install handler.
 
-## Reverse brainstorming (how do we make it fail?)
+## Reverse brainstorming (ways to make it fail)
 
 | Way to fail | Counter-measure |
 |---|---|
@@ -177,7 +188,7 @@ flowchart LR
 | `oauth` | Install and callback routes, exchange, refresh |
 | `health` | `LinearHealth` |
 | `plugin` | `LinearPlugin`, `LinearRuntime`, `Keeper`, `Linear`, `InstallContext` |
-| `testing` | `sign`, `SignedEvent` fixtures |
+| `testing` | `EventFixture`, `SignedEvent` (signing uses `verify::sign`) |
 
 Routes: `POST /linear/webhooks`, `GET /linear/auth`,
 `GET /linear/auth/callback`. All `#[public]`.
@@ -272,18 +283,17 @@ Two auth shapes:
 
 ### OAuth
 
-- **AC-33** Install redirects to the authorize URL with all parameters
-  (comma scopes, `actor`, `state`, PKCE S256, `prompt=consent`) and sets
-  a `__Host-` state cookie (`HttpOnly`, `Secure`, `SameSite=Lax`,
-  10 min).
-- **AC-34** The callback checks the state (403), refuses an `error`
-  answer, exchanges the code with the verifier, reads the organization,
-  stores the token, runs the install handler, and redirects to a local
-  path. An exchange failure gives 502 with no secret.
+- **AC-33** Install redirects to the authorize URL with all parameters:
+  comma scopes, `actor`, `state`, PKCE S256, and `prompt=consent`. It sets
+  a `__Host-` state cookie (`HttpOnly`, `Secure`, `SameSite=Lax`, 10 min).
+- **AC-34** The callback checks the state (403) and refuses an `error`
+  answer. It exchanges the code with the verifier and reads the
+  organization. It stores the token, runs the install handler, and
+  redirects to a local path. An exchange failure gives 502 with no secret.
 - **AC-35** `client_for` refreshes within the margin, one refresh per
-  workspace at a time, stores the rotated pair, maps a refused refresh to
-  `Reauthorize` (deletes only an unchanged pair), and keeps a valid old
-  token on a transient failure.
+  workspace at a time. It stores the rotated pair. A refused grant gives
+  `Reauthorize` and deletes only an unchanged pair. A transient failure
+  keeps a valid old token and starts a backoff.
 - **AC-36** OAuth routes give 404 when OAuth is off.
 - **AC-37** `TokenStore` is a trait with an in-memory default; the app can
   replace it.

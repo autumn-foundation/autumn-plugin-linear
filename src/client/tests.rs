@@ -339,3 +339,57 @@ async fn a_missing_retry_after_uses_the_default_wait_against_the_cap() {
         "{err:?}"
     );
 }
+
+#[tokio::test]
+async fn the_reset_header_sets_the_wait_when_retry_after_is_missing() {
+    let reset_ms = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_millis()
+        + 20)
+        .to_string();
+    let stub = Stub::start(vec![
+        StubResponse::json(429, &json!({})).header("x-ratelimit-requests-reset", &reset_ms),
+        StubResponse::json(200, &json!({"data": {"viewer": {"id": "u1"}}})),
+    ])
+    .await;
+    // The default wait is 1 s, above the 50 ms cap. The reset header gives
+    // a wait under the cap, so the call retries.
+    client(&stub, Credential::api_key("k"))
+        .viewer()
+        .await
+        .expect("viewer");
+    assert_eq!(stub.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn create_comment_once_finds_an_earlier_comment() {
+    let stub = Stub::data(&[
+        json!({"comments": {"nodes": [{"id": "c-1"}]}}),
+        json!({"comments": {"nodes": []}}),
+        json!({"commentCreate": {"success": true, "comment": {"id": "c-2"}}}),
+        json!({"agentActivityCreate": {"success": true, "agentActivity": {"id": "a-9"}}}),
+    ])
+    .await;
+    let c = client(&stub, Credential::bearer("t"));
+    let first = c
+        .create_comment_once(&CommentCreate::new("i-1", "x").with_stable_id("k1"))
+        .await
+        .expect("found");
+    assert_eq!((first.0.id.as_str(), first.1), ("c-1", false));
+    let second = c
+        .create_comment_once(&CommentCreate::new("i-1", "x").with_stable_id("k2"))
+        .await
+        .expect("made");
+    assert_eq!((second.0.id.as_str(), second.1), ("c-2", true));
+    let err = c
+        .create_comment_once(&CommentCreate::new("i-1", "x"))
+        .await
+        .expect_err("needs an id");
+    assert_eq!(err.kind(), ErrorKind::InvalidRequest);
+    let thought = crate::graphql::ActivityContent::Thought { body: "b".into() };
+    c.create_agent_activity_with_id("s-1", &thought, "a-9")
+        .await
+        .expect("activity");
+    assert_eq!(stub.requests()[3].json()["variables"]["input"]["id"], "a-9");
+}

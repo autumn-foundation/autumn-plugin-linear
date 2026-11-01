@@ -62,3 +62,22 @@ fn scopes_split_on_commas_and_spaces() {
     t.scope = "read write,comments:create".into();
     assert_eq!(t.scopes(), vec!["read", "write", "comments:create"]);
 }
+
+#[tokio::test]
+async fn delete_if_removes_only_the_seen_token() {
+    let store = InMemoryTokenStore::new();
+    let seen = token(None);
+    store.put(&org("o1"), seen.clone()).await.expect("put");
+    let mut newer = token(None);
+    newer.access_token = "at-new".into();
+    assert!(!store.delete_if(&org("o1"), &newer).await.expect("compare"));
+    assert!(store.get(&org("o1")).await.expect("get").is_some());
+    assert!(store.delete_if(&org("o1"), &seen).await.expect("compare"));
+    assert!(store.get(&org("o1")).await.expect("get").is_none());
+    assert!(
+        !store
+            .delete_if(&org("o1"), &seen)
+            .await
+            .expect("missing is false")
+    );
+}

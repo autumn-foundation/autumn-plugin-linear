@@ -62,18 +62,10 @@ async fn issue_created(ctx: WebhookContext) -> AutumnResult<()> {
     // comment, and does not post it again.
     let comment = CommentCreate::new(&issue.id, format!("Triage bot: priority {priority}."))
         .with_stable_id(&format!("triage:{}", issue.id));
-    let id = comment.id.clone().unwrap_or_default();
-    if client
-        .find_comment(&id)
+    client
+        .create_comment_once(&comment)
         .await
-        .map_err(|e| e.to_autumn_error())?
-        .is_none()
-    {
-        client
-            .create_comment(&comment)
-            .await
-            .map_err(|e| e.to_autumn_error())?;
-    }
+        .map_err(|e| e.to_autumn_error())?;
     tracing::info!(org = %ctx.event.organization_id, issue = %issue.id, priority, "issue triaged");
     Ok(())
 }
@@ -134,7 +126,7 @@ mod tests {
                         let query = body["query"].as_str().unwrap_or_default().to_owned();
                         seen.lock().expect("lock").push(body);
                         let issue = json!({"id": "i-1", "identifier": "ENG-1"});
-                        let data = if query.contains("issueUpdate") {
+                        let data = if query.contains("issueUpdate(") {
                             json!({"issueUpdate": {"success": true, "issue": issue}})
                         } else if query.contains("comments(") {
                             json!({"comments": {"nodes": []}})

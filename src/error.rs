@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use autumn_web::AutumnError;
 use autumn_web::reexports::http::StatusCode;
-use thiserror::Error;
+use thiserror::Error as ThisError;
 
 /// Classifies an [`Error`] without its payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +53,8 @@ pub enum ErrorKind {
     OAuthDisabled,
     /// Webhooks are off (`LINEAR_WEBHOOK_SECRET` is not set).
     WebhooksDisabled,
+    /// A refresh failed a short time ago. The plugin waits before the next one.
+    RefreshBackoff,
     /// A token or delivery store failed.
     Store,
     /// The app does not use the plugin (no runtime in the app state).
@@ -60,7 +62,7 @@ pub enum ErrorKind {
 }
 
 /// The plugin error type.
-#[derive(Debug, Error)]
+#[derive(Debug, ThisError)]
 #[non_exhaustive]
 pub enum Error {
     /// The `[linear]` config is missing or not valid.
@@ -99,7 +101,8 @@ pub enum Error {
     LinearApi {
         /// The HTTP status from Linear.
         status: u16,
-        /// The response body, truncated to 500 chars.
+        /// The response body, truncated to 500 chars. For a token call,
+        /// only the OAuth error code.
         body: String,
     },
 
@@ -148,6 +151,13 @@ pub enum Error {
     #[error("linear webhooks are off; set LINEAR_WEBHOOK_SECRET")]
     WebhooksDisabled,
 
+    /// A refresh failed a short time ago. The plugin waits before the next one.
+    #[error("linear token refresh failed a short time ago; try again in {retry_after:?}")]
+    RefreshBackoff {
+        /// The time until the next refresh can run.
+        retry_after: Duration,
+    },
+
     /// A token or delivery store failed.
     #[error("linear store error: {0}")]
     Store(String),
@@ -180,6 +190,7 @@ impl Error {
             Self::Reauthorize(_) => ErrorKind::Reauthorize,
             Self::OAuthDisabled => ErrorKind::OAuthDisabled,
             Self::WebhooksDisabled => ErrorKind::WebhooksDisabled,
+            Self::RefreshBackoff { .. } => ErrorKind::RefreshBackoff,
             Self::Store(_) => ErrorKind::Store,
             Self::MissingRuntime => ErrorKind::MissingRuntime,
         }
@@ -202,7 +213,9 @@ impl Error {
             | ErrorKind::LinearApi
             | ErrorKind::GraphQl
             | ErrorKind::UnexpectedResponse => StatusCode::BAD_GATEWAY,
-            ErrorKind::RateLimited | ErrorKind::MissingRuntime => StatusCode::SERVICE_UNAVAILABLE,
+            ErrorKind::RateLimited | ErrorKind::RefreshBackoff | ErrorKind::MissingRuntime => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             ErrorKind::Config | ErrorKind::Store => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -216,7 +229,10 @@ impl Error {
     #[must_use]
     pub const fn is_transient(&self) -> bool {
         match self {
-            Self::RateLimited { .. } | Self::Http(_) | Self::InProgress(_) => true,
+            Self::RateLimited { .. }
+            | Self::RefreshBackoff { .. }
+            | Self::Http(_)
+            | Self::InProgress(_) => true,
             Self::LinearApi { status, .. } => *status >= 500,
             _ => false,
         }

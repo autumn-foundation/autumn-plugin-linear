@@ -142,11 +142,11 @@ impl fmt::Display for EventType {
 pub struct Action(String);
 
 impl Action {
-    /// An entity was created.
+    /// Linear created an entity.
     pub const CREATE: &'static str = "create";
     /// An entity changed. `updatedFrom` holds the old values.
     pub const UPDATE: &'static str = "update";
-    /// An entity was removed.
+    /// Linear removed an entity.
     pub const REMOVE: &'static str = "remove";
     /// The workspace revoked the OAuth app.
     pub const REVOKED: &'static str = "revoked";

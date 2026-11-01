@@ -1,14 +1,20 @@
 //! OAuth install, code exchange, and refresh.
 //!
-//! `GET /linear/auth` starts an install: it sets a state cookie and sends
-//! the browser to `https://linear.app/oauth/authorize` with the client id,
-//! the scopes, the actor, the state, and a PKCE S256 challenge.
+//! `GET /linear/auth` starts an install. It sets a state cookie. Then it
+//! sends the browser to `https://linear.app/oauth/authorize`. The URL has
+//! the client id, the scopes, the actor, the state, and a PKCE S256
+//! challenge.
 //!
-//! `GET /linear/auth/callback` checks, in this order: an `error` answer
-//! (403), the state against the cookie (403), and the code (400). Then it
-//! exchanges the code with the PKCE verifier, reads the workspace, stores
-//! the token, runs the install handler, and redirects to
-//! `after_install_path?organization={id}`.
+//! `GET /linear/auth/callback` checks, in this order:
+//!
+//! 1. An `error` answer (403).
+//! 2. The state against the cookie (403).
+//! 3. The code (400).
+//!
+//! Then it exchanges the code with the PKCE verifier and reads the
+//! workspace. It stores the token, runs the install handler, and redirects
+//! to `after_install_path?organization={id}`. Anyone can type that query
+//! value: bind the workspace to your user in the install handler.
 //!
 //! The flow keeps no server state (ADR 0001). The cookie holds a random
 //! nonce. The verifier is `hex(HMAC-SHA256(client_secret, "pkce:" + nonce))`,
@@ -53,6 +59,10 @@ pub const STATE_COOKIE_MAX_AGE_SECS: u32 = 600;
 
 /// The cookie attributes. `__Host-` needs `Path=/` and `Secure`.
 const COOKIE_ATTRIBUTES: &str = "Path=/; HttpOnly; Secure; SameSite=Lax";
+/// The token life when Linear sends no `expires_in`: Linear documents 24
+/// hours.
+pub const DEFAULT_TOKEN_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
+
 /// Random bytes in the state nonce.
 const NONCE_BYTES: usize = 32;
 
@@ -156,10 +166,20 @@ async fn token_call(
     let bytes = response.bytes().await.map_err(Error::Http)?;
     if !(200..300).contains(&status) {
         let error: TokenError = serde_json::from_slice(&bytes).unwrap_or_default();
+        let code = error.error.as_deref();
         if let Some(subject) = terminal_on_refusal
-            && (status == 401 || (status == 400 && error.error.as_deref() == Some("invalid_grant")))
+            && code == Some("invalid_grant")
         {
             return Err(Error::Reauthorize(subject.to_owned()));
+        }
+        // RFC 6749 5.2: `invalid_client` (often 401) is the app secret, not a
+        // dead grant. The token stays; the operator fixes the secret.
+        if status == 401 || code == Some("invalid_client") {
+            return Err(Error::Config(format!(
+                "linear refused the client credentials ({}); check {}",
+                code.unwrap_or("401"),
+                crate::config::CLIENT_SECRET_ENV
+            )));
         }
         // The body can echo request fields. Keep only the error code.
         return Err(Error::LinearApi {
@@ -182,9 +202,13 @@ async fn token_call(
     Ok(WorkspaceToken::new(
         answer.access_token,
         answer.refresh_token,
-        answer
-            .expires_in
-            .map(|secs| now_ms.saturating_add(secs.saturating_mul(1000))),
+        Some(
+            now_ms.saturating_add(
+                answer
+                    .expires_in
+                    .map_or(DEFAULT_TOKEN_LIFETIME_MS, |secs| secs.saturating_mul(1000)),
+            ),
+        ),
         scope,
     ))
 }
@@ -245,7 +269,7 @@ pub(crate) async fn refresh_token(
     .await
 }
 
-/// Parse a raw query into pairs. A repeated key is refused.
+/// Parse a raw query into pairs. The parser refuses a repeated key.
 fn parse_query(raw: Option<&str>) -> Result<Vec<(String, String)>> {
     let mut seen = HashSet::new();
     let mut pairs = Vec::new();
@@ -384,7 +408,9 @@ async fn callback(state: &AppState, headers: &HeaderMap, query: Option<&str>) ->
     tracing::info!(org = %org, "linear app installed");
     if let Some(handler) = runtime.on_install() {
         let linear = Linear::from_runtime(Arc::clone(&runtime), state.clone());
-        handler(InstallContext::new(organization, scope, linear))
+        let mut ctx = InstallContext::new(organization, scope, linear);
+        ctx.headers = headers.clone();
+        handler(ctx)
             .await
             .map_err(|err| Error::Store(format!("the install handler failed: {err}")))?;
     }
@@ -398,6 +424,12 @@ async fn callback(state: &AppState, headers: &HeaderMap, query: Option<&str>) ->
         || location.path().to_owned(),
         |query| format!("{}?{query}", location.path()),
     );
+    // A scheme-relative result would leave the app.
+    if path.starts_with("//") || !path.starts_with('/') {
+        return Err(Error::Config(
+            "after_install_path must stay local".to_owned(),
+        ));
+    }
     redirect(&path, &clear_state_cookie())
 }
 

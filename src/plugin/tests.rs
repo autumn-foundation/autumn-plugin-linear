@@ -403,7 +403,7 @@ async fn concurrent_callers_share_one_refresh() {
 async fn a_refused_refresh_deletes_the_pair_and_asks_for_a_reinstall() {
     for refusal in [
         StubResponse::json(400, &json!({"error": "invalid_grant"})),
-        StubResponse::json(401, &json!({"error": "invalid_client"})),
+        StubResponse::json(403, &json!({"error": "invalid_grant"})),
     ] {
         let stub = Stub::start(vec![refusal]).await;
         let runtime = oauth_runtime(&stub);
@@ -555,4 +555,154 @@ async fn install_context_new_carries_the_handle() {
     let ctx = InstallContext::new(organization, "read", linear);
     assert_eq!(ctx.organization_id().expect("org").as_str(), ORG);
     assert!(ctx.linear.runtime().config().oauth_enabled());
+}
+
+#[tokio::test]
+async fn an_expired_token_backs_off_after_a_failed_refresh() {
+    let stub = Stub::start(vec![StubResponse::text(503, "busy")]).await;
+    let runtime = oauth_runtime(&stub);
+    put(&runtime, token("at-0", Some("rt-0"), Some(-1))).await;
+    assert!(runtime.client_for(&org(), NOW_MS).await.is_err());
+    let err = runtime
+        .client_for(&org(), NOW_MS + 1_000)
+        .await
+        .expect_err("backs off");
+    assert_eq!(err.kind(), ErrorKind::RefreshBackoff);
+    assert!(err.is_transient());
+    assert_eq!(err.status().as_u16(), 503);
+    assert_eq!(
+        stub.requests().len(),
+        1,
+        "no second refresh call inside the backoff"
+    );
+}
+
+#[tokio::test]
+async fn a_refresh_answer_without_scope_or_expiry_keeps_safe_values() {
+    let answer = StubResponse::json(
+        200,
+        &json!({"access_token": "at-1", "refresh_token": "rt-1"}),
+    );
+    let stub = Stub::start(vec![answer]).await;
+    let runtime = oauth_runtime(&stub);
+    put(&runtime, token("at-0", Some("rt-0"), Some(1_000))).await;
+    runtime.client_for(&org(), NOW_MS).await.expect("client");
+    let stored = current(&runtime).await.expect("stored");
+    assert_eq!(stored.scope, "read", "the old scope stays");
+    assert_eq!(
+        stored.expires_at_ms,
+        Some(NOW_MS + crate::oauth::DEFAULT_TOKEN_LIFETIME_MS)
+    );
+}
+
+#[tokio::test]
+async fn a_refused_client_secret_keeps_the_tokens() {
+    // RFC 6749: 401 `invalid_client` is the app's own secret, not a dead
+    // grant. The workspace token stays.
+    let stub = Stub::start(vec![StubResponse::json(
+        401,
+        &json!({"error": "invalid_client"}),
+    )])
+    .await;
+    let runtime = oauth_runtime(&stub);
+    put(&runtime, token("at-0", Some("rt-0"), Some(-1))).await;
+    let err = runtime
+        .client_for(&org(), NOW_MS)
+        .await
+        .expect_err("refused");
+    assert_eq!(err.kind(), ErrorKind::Config, "{err:?}");
+    assert!(current(&runtime).await.is_some());
+}
+
+#[tokio::test]
+async fn a_cancelled_caller_does_not_lose_the_rotated_pair() {
+    let stub = Stub::start(vec![
+        refreshed("at-1", "rt-1").delayed(Duration::from_millis(200)),
+    ])
+    .await;
+    let runtime = Arc::new(oauth_runtime(&stub));
+    put(&runtime, token("at-0", Some("rt-0"), Some(1_000))).await;
+    let caller = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        async move { runtime.client_for(&org(), NOW_MS).await.map(|_| ()) }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    caller.abort();
+    let _ = caller.await;
+    for _ in 0..100 {
+        if current(&runtime).await.map(|t| t.access_token).as_deref() == Some("at-1") {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the rotated pair was lost");
+}
+
+#[test]
+fn the_plugin_declares_the_linear_section_and_public_routes() {
+    let app = autumn_web::app().plugin(LinearPlugin::new());
+    assert!(app.has_config_section("linear"));
+    let (_, infos) = mount();
+    assert_eq!(infos.len(), 3);
+    for info in &infos {
+        assert_eq!(
+            info.classification,
+            autumn_web::route_listing::RouteClassification::Public,
+            "{info:?}"
+        );
+    }
+}
+
+#[test]
+fn a_bad_config_fails_the_startup_hook() {
+    let plugin = LinearPlugin::new()
+        .on("Issue", noop)
+        .env_lookup(env(&[("LINEAR_API_KEY", "k")]));
+    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        autumn_web::test::TestApp::new().plugin(plugin).build()
+    }));
+    assert!(
+        built.is_err(),
+        "handlers without a webhook secret stop the startup"
+    );
+}
+
+#[tokio::test]
+async fn the_indicator_is_in_health_and_not_in_ready() {
+    let stub = Stub::data(&[json!({"viewer": {"id": "u1", "name": "Bot"}})]).await;
+    let state = state(None);
+    LinearPlugin::new()
+        .api_base_url(stub.base_url.clone())
+        .start(&state, config(None, &[("LINEAR_API_KEY", "k")]))
+        .expect("starts");
+    let registry = state.health_indicator_registry();
+    let all = registry.run_all().await;
+    let linear = all.iter().find(|r| r.name == "linear").expect("in health");
+    assert_eq!(linear.group, IndicatorGroup::HealthOnly);
+    assert!(
+        registry
+            .run_readiness()
+            .await
+            .iter()
+            .all(|r| r.name != "linear"),
+        "not in ready"
+    );
+}
+
+#[test]
+fn env_lookup_is_the_only_source_of_linear_variables() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let plugin = LinearPlugin::new().env_lookup({
+        let calls = Arc::clone(&calls);
+        move |_name: &str| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            None
+        }
+    });
+    let loaded = plugin.load_config().expect("loads");
+    assert!(
+        calls.load(std::sync::atomic::Ordering::SeqCst) >= 13,
+        "every variable goes through the lookup"
+    );
+    assert!(loaded.client_id.is_none());
 }

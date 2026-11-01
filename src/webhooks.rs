@@ -84,10 +84,10 @@ impl VerifiedWebhook {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::WebhooksDisabled`] with no signing secret,
-    /// [`Error::Signature`] when the HMAC fails, [`Error::Replay`] when the
-    /// signed time is outside the window, and [`Error::InvalidRequest`]
-    /// for a bad envelope or a missing delivery id.
+    /// - [`Error::WebhooksDisabled`]: no signing secret.
+    /// - [`Error::Signature`]: the HMAC fails.
+    /// - [`Error::Replay`]: the signed time is outside the window.
+    /// - [`Error::InvalidRequest`]: a bad envelope or no delivery id.
     pub fn from_parts(
         runtime: Arc<LinearRuntime>,
         headers: &HeaderMap,
@@ -267,7 +267,7 @@ impl std::fmt::Debug for WebhookRegistry {
 impl WebhookRegistry {
     /// Make an empty registry.
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -277,7 +277,7 @@ impl WebhookRegistry {
     ///
     /// Returns [`Error::Config`] when the type or the action is malformed,
     /// or the key already has a handler.
-    pub fn register(
+    pub(crate) fn register(
         &mut self,
         event_type: &str,
         action: Option<&str>,
@@ -408,21 +408,9 @@ async fn dispatch(state: &AppState, webhook: VerifiedWebhook) -> AutumnResult<We
     let runtime = Arc::clone(&webhook.runtime);
     let event = &webhook.event;
     if event.is(EventType::OAUTH_APP) && event.action.as_str() == Action::REVOKED {
-        let event_at = event
-            .created_at
-            .as_deref()
-            .and_then(parse_time_ms)
-            .or(Some(event.webhook_timestamp_ms));
-        let deleted = runtime
-            .keeper()
-            .delete_for_event(&event.organization_id, event_at)
+        revoke_cleanup(&runtime, event)
             .await
             .map_err(|err| err.to_autumn_error())?;
-        if deleted {
-            tracing::info!(org = %event.organization_id, "linear app revoked; token deleted");
-        } else {
-            tracing::info!(org = %event.organization_id, "linear token is from a later install; kept");
-        }
     }
     let Some(handler) = runtime.registry().get(&event.event_type, &event.action) else {
         tracing::debug!(r#type = %event.event_type, action = %event.action, "linear webhook has no handler; answered 200");
@@ -442,6 +430,43 @@ async fn dispatch(state: &AppState, webhook: VerifiedWebhook) -> AutumnResult<We
         err
     })?;
     Ok(WebhookOutcome::Handled)
+}
+
+/// Delete the workspace token on `OAuthApp` `revoked`.
+///
+/// - A revoke for another OAuth client changes nothing.
+/// - With a signed `createdAt`, a token from a later install stays. The
+///   time is the same on every retry of the event.
+/// - With no `createdAt`, the plugin asks Linear whether the token still
+///   works. The send time of a retry is no event time: it is later than a
+///   reinstall, and a new, valid token would go.
+async fn revoke_cleanup(runtime: &LinearRuntime, event: &WebhookEvent) -> Result<()> {
+    let org = &event.organization_id;
+    let client = event
+        .raw
+        .get("oauthClientId")
+        .and_then(serde_json::Value::as_str);
+    if let (Some(client), Some(ours)) = (client, runtime.config().client_id.as_deref())
+        && client != ours
+    {
+        tracing::warn!(org = %org, "linear revoke for another OAuth client; token kept");
+        return Ok(());
+    }
+    let deleted = match event.created_at.as_deref().and_then(parse_time_ms) {
+        Some(event_at) => {
+            runtime
+                .keeper()
+                .delete_for_event(org, Some(event_at))
+                .await?
+        }
+        None => runtime.keeper().delete_if_dead(org).await?,
+    };
+    if deleted {
+        tracing::info!(org = %org, "linear app revoked; token deleted");
+    } else {
+        tracing::info!(org = %org, "linear token still works or is from a later install; kept");
+    }
+    Ok(())
 }
 
 /// Parse an RFC 3339 time into Unix ms.

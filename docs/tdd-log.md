@@ -10,3 +10,4 @@ then the code (GREEN), then refactor with the tests green.
 | 3a | `graphql` | 10 failed, 77 passed | 87 passed; refactor: explicit success check (+1 test) |
 | 3b | `client` | 9 failed, 91 passed | 100 passed (one test fixture fixed: it lacked `Retry-After`; +1 test for that case) |
 | 4 | `webhooks`, `oauth`, `plugin`, `health`, `testing` | 33 failed, 132 passed (the six core flows stubbed; `an_in_flight_duplicate_is_409` skipped: it waits for a handler the stub never starts) | 166 passed |
+| 5 | Review fixes (security, correctness, conformance, API) | 24 new tests first: 14 compile errors for the missing APIs, then 4 failures. 3 were test mistakes (one test reached real Linear; fixed so no test leaves loopback). 1 was a real design flaw: a short window dropped a running claim | 190 passed |

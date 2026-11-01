@@ -106,6 +106,28 @@ pub trait TokenStore: Send + Sync + 'static {
     fn put<'a>(&'a self, org: &'a OrganizationId, token: WorkspaceToken) -> StoreFuture<'a, ()>;
     /// Delete the token of `org`. Deleting a missing token is not an error.
     fn delete<'a>(&'a self, org: &'a OrganizationId) -> StoreFuture<'a, ()>;
+
+    /// Delete the token of `org` only when the store holds `seen`. Returns
+    /// `true` when it deleted the token.
+    ///
+    /// The default reads, compares, and deletes in three steps. A store
+    /// that replicas share must override it with one atomic step (for
+    /// example `DELETE ... WHERE access_token = $seen`). Else a replica can
+    /// delete a pair that another replica just stored.
+    fn delete_if<'a>(
+        &'a self,
+        org: &'a OrganizationId,
+        seen: &'a WorkspaceToken,
+    ) -> StoreFuture<'a, bool> {
+        Box::pin(async move {
+            if self.get(org).await?.as_ref() == Some(seen) {
+                self.delete(org).await?;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        })
+    }
 }
 
 /// A process-local [`TokenStore`].
@@ -154,6 +176,26 @@ impl TokenStore for InMemoryTokenStore {
             .write()
             .map(|mut tokens| {
                 tokens.remove(org);
+            })
+            .map_err(|_| poisoned());
+        Box::pin(async move { result })
+    }
+
+    fn delete_if<'a>(
+        &'a self,
+        org: &'a OrganizationId,
+        seen: &'a WorkspaceToken,
+    ) -> StoreFuture<'a, bool> {
+        // One write lock covers the compare and the delete.
+        let result = self
+            .tokens
+            .write()
+            .map(|mut tokens| {
+                let same = tokens.get(org) == Some(seen);
+                if same {
+                    tokens.remove(org);
+                }
+                same
             })
             .map_err(|_| poisoned());
         Box::pin(async move { result })

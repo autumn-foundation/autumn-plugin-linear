@@ -291,3 +291,42 @@ fn a_custom_operation_reads_its_root_without_a_success_check() {
     let created: Created = op.extract(json!({"thing": {"id": "t-1"}})).expect("thing");
     assert_eq!(created.id, "t-1");
 }
+
+#[test]
+fn a_rate_limit_code_next_to_data_is_not_retried() {
+    // Data means the call ran. A retry could run a mutation two times.
+    let answer = json!({
+        "data": {"issueCreate": {"success": true, "issue": {"id": "i-1"}}},
+        "errors": [{"message": "slow down", "extensions": {"code": "RATELIMITED"}}],
+    });
+    let err = parse_response(200, None, &body(&answer)).expect_err("errors");
+    assert_eq!(err.kind(), ErrorKind::GraphQl);
+    assert!(!err.is_transient());
+}
+
+#[test]
+fn debug_hides_the_webhook_secret_and_variables() {
+    let hook = WebhookCreate {
+        url: "https://x.example.com".into(),
+        resource_types: vec!["Issue".into()],
+        secret: Some("whsec-top".into()),
+        ..WebhookCreate::default()
+    };
+    assert!(!format!("{hook:?}").contains("whsec-top"));
+    let op = ops::create_webhook(&hook);
+    assert!(!format!("{op:?}").contains("whsec-top"), "{op:?}");
+    assert_eq!(
+        op.variables["input"]["secret"], "whsec-top",
+        "the request still carries it"
+    );
+}
+
+#[test]
+fn constructors_for_app_code() {
+    let org = Organization::new("org-1");
+    assert_eq!(org.id, "org-1");
+    let create = IssueCreate::new("t-1", "T").with_stable_id("k");
+    assert_eq!(create.id, Some(stable_uuid("k")));
+    let op = ops::issues(&json!({}), u32::MAX, None);
+    assert_eq!(op.variables["first"], i64::from(i32::MAX), "Int is 32-bit");
+}

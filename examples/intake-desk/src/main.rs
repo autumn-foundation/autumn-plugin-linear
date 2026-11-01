@@ -475,7 +475,7 @@ async fn with_harvest(
     camel: &CamelContext,
     pool: &DbPool,
     url: &str,
-    source: harvest_camel::CamelSource,
+    source: Arc<harvest_camel::CamelSource>,
     scenario: &Scenario,
 ) -> Result<Value, BoxError> {
     // Activities get this handle. Resolve their endpoint before they run.

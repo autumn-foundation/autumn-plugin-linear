@@ -9,7 +9,7 @@
 Mateo. harvest-camel needs `autumn-harvest-plugin`, which turns on the
 `autumn-web` default features (libpq, SQLite). The plugin itself uses
 `autumn-web` with no default features. In one workspace, Cargo unifies the
-features, and every plugin build would pull the C libraries. harvest-camel
+features. Then every plugin build pulls the C libraries. harvest-camel
 also needs Rust 1.89; the plugin MSRV is 1.88.
 
 ## Decision

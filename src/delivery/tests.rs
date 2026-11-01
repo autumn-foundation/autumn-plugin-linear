@@ -88,3 +88,46 @@ fn zero_capacity_counts_as_one() {
     let store = InMemoryDeliveryStore::new(DEFAULT_WINDOW_MS, 0);
     assert_eq!(store.capacity, 1);
 }
+
+#[tokio::test]
+async fn a_full_store_never_drops_a_running_claim() {
+    let store = InMemoryDeliveryStore::new(DEFAULT_WINDOW_MS, 2);
+    assert_eq!(claim(&store, "a", NOW).await, Claim::Fresh);
+    assert_eq!(claim(&store, "b", NOW + 1).await, Claim::Fresh);
+    // Both run: a new id waits (409), and no running claim is lost.
+    assert_eq!(claim(&store, "c", NOW + 2).await, Claim::InFlight);
+    assert_eq!(claim(&store, "a", NOW + 3).await, Claim::InFlight);
+    // A done claim makes room first.
+    store.complete("b", NOW + 1).await.expect("completes");
+    assert_eq!(claim(&store, "c", NOW + 4).await, Claim::Fresh);
+    assert_eq!(
+        claim(&store, "a", NOW + 5).await,
+        Claim::InFlight,
+        "a still runs"
+    );
+}
+
+#[tokio::test]
+async fn an_expired_lease_makes_room_in_a_full_store() {
+    let store = InMemoryDeliveryStore::new(DEFAULT_WINDOW_MS, 1).with_lease_ms(100);
+    assert_eq!(claim(&store, "a", NOW).await, Claim::Fresh);
+    assert_eq!(claim(&store, "b", NOW + 50).await, Claim::InFlight);
+    assert_eq!(claim(&store, "b", NOW + 100).await, Claim::Fresh);
+}
+
+#[test]
+fn a_zero_lease_is_clamped() {
+    let store = InMemoryDeliveryStore::new(10, 5).with_lease_ms(0);
+    assert_eq!(store.lease_ms, 1);
+}
+
+#[tokio::test]
+async fn a_short_window_never_drops_a_running_claim() {
+    let store = InMemoryDeliveryStore::new(10, 5).with_lease_ms(1_000);
+    assert_eq!(claim(&store, "a", NOW).await, Claim::Fresh);
+    // Past the window, inside the lease: the claim still runs.
+    assert_eq!(claim(&store, "a", NOW + 500).await, Claim::InFlight);
+    store.complete("a", NOW).await.expect("completes");
+    // A done claim leaves with the window.
+    assert_eq!(claim(&store, "a", NOW + 501).await, Claim::Fresh);
+}

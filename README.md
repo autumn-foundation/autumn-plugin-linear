@@ -50,10 +50,10 @@ In Linear, open Settings → API, add a webhook to
 | Piece | Detail |
 |---|---|
 | Config section | `[linear]`. Secrets come only from the environment. |
-| `POST /linear/webhooks` | Checks the HMAC (401), the signed `webhookTimestamp` (401), and `Linear-Delivery` (400). Skips done duplicates (200), answers 409 while the same delivery runs, deletes the token on `OAuthApp` `revoked`, runs the handler. |
+| `POST /linear/webhooks` | Checks the HMAC (401), the body size (413), the envelope and `Linear-Delivery` (400), and the signed `webhookTimestamp` (401). Skips done duplicates (200). Answers 409 while the same delivery runs. Deletes the token on `OAuthApp` `revoked`. Runs the handler. |
 | `GET /linear/auth` | Starts the install: state cookie, PKCE, redirect to Linear. |
 | `GET /linear/auth/callback` | Checks the state, exchanges the code, reads the workspace, stores the token, runs the install handler. |
-| `Linear` extractor | `client()` (API key), `client_for(&org)` (workspace token), `install_url()`. |
+| `Linear` extractor | `client()` (API key), `client_for(&org)` (workspace token). `Linear::install_url()` gives the install path. |
 | Health | A `"linear"` indicator in API-key mode, in `/actuator/health` only. |
 
 The three routes are `#[public]`, so `autumn routes audit` accepts them.
@@ -130,8 +130,8 @@ for example with a vault lookup.
 | `LINEAR_CLIENT_SECRET` | OAuth client secret. OAuth needs it. |
 | `LINEAR_API_KEY` | Personal API key (one workspace). |
 
-A secret key (`secret`, `token`, `api_key`, `*_secret`, `*_token`,
-`*_key`) in `[linear]` stops the startup.
+A secret key (`secret`, `token`, `api_key`, `password`, `*_secret`,
+`*_token`, `*_key`) in `[linear]` stops the startup.
 
 ## Two app shapes
 
@@ -145,6 +145,14 @@ use it while OAuth is off.
 5 minutes before it expires. On `NotInstalled` or `Reauthorize`, send the
 browser to `Linear::install_url()`.
 
+Run code after each install with `.on_install(handler)`. The handler gets
+the workspace, the granted scopes, the callback request headers, and a
+`Linear` handle. Bind the workspace to your user there: read your session
+cookie from `ctx.headers`. Do not bind it on the page after the install.
+The `organization` value in that URL is not signed, and anyone can type
+it. With `actor = "user"`, each new install by a workspace member
+replaces the stored token. Use `actor = "app"` for a bot.
+
 ## Calling the API
 
 ```rust
@@ -157,16 +165,19 @@ client
     .await
     .map_err(|e| e.to_autumn_error())?;
 let comment = CommentCreate::new(&issue.id, "Triaged.").with_stable_id("triage:ENG-123");
-client.create_comment(&comment).await.map_err(|e| e.to_autumn_error())?;
+// Posts the comment only when no comment has its id.
+client.create_comment_once(&comment).await.map_err(|e| e.to_autumn_error())?;
 ```
 
 Helpers: `viewer`, `organization`, `issue`, `issues` (one page,
 `Connection<Issue>`), `create_issue`, `update_issue`, `create_comment`,
-`find_comment`, `create_agent_activity`, `add_agent_session_url`,
+`create_comment_once`, `find_comment`, `create_agent_activity`,
+`create_agent_activity_with_id`, `add_agent_session_url`,
 `create_webhook`, `delete_webhook`. `query::<T>()` runs your own document.
 
-The client retries only rate-limited calls (429 or `RATELIMITED`), after
-the `Retry-After` wait. A wait longer than `max_rate_limit_wait_secs`
+The client retries only rate-limited calls (429, or `RATELIMITED` with no
+`data`). It waits for `Retry-After`, else until
+`X-RateLimit-Requests-Reset`, else 1 second. A wait longer than `max_rate_limit_wait_secs`
 stops the retries: `Error::RateLimited` keeps the wait, so a job queue can
 run the work later. A retry of another failure can run a mutation two
 times, so the client does not do it. Give each mutation a client id
@@ -215,9 +226,21 @@ use `?` to change an `Error` into an `AutumnError`: Autumn's blanket
   serializes both tokens in clear text: encrypt them at rest.
 - **Refresh across replicas.** One process runs one refresh per workspace
   at a time. Linear gives a refresh a 30 minute grace period. When Linear
-  refuses a refresh, the plugin uses a fresh pair that another replica
-  stored, and deletes the token only when the store still holds the
-  refused pair.
+  refuses a refresh, the plugin uses a fresh pair from another replica. It
+  deletes the token only when the store still holds the refused pair.
+  Implement `TokenStore::delete_if` as one atomic step in a shared store.
+- **Refresh failures.** After a failed refresh, the plugin waits 10
+  seconds before the next one. A caller with an expired token gets
+  `RefreshBackoff` (503) in that time. A refused client secret
+  (`invalid_client`) is a config error: the tokens stay.
+- **Revoke.** On `OAuthApp` `revoked`, the plugin deletes the token, unless
+  a later install stored it. A revoke for another `oauthClientId` changes
+  nothing. When the event has no `createdAt`, the plugin asks Linear
+  whether the token still works.
+- **One secret, many workspaces.** The plugin checks one signing secret
+  (plus the previous one). When you create a webhook in each workspace
+  with `create_webhook`, an admin of one workspace can read its secret.
+  Give each workspace its own webhook route and secret in that case.
 - **CSRF.** When `security.csrf.enabled` is on, add `/linear/webhooks` to
   `security.csrf.exempt_paths`. The plugin logs a warning when the path is
   missing.
@@ -235,9 +258,20 @@ use `?` to change an `Error` into an `AutumnError`: Autumn's blanket
   process environment. `LinearPlugin::env_lookup` does the same for a
   running app.
 - `LinearPlugin::api_base_url("http://127.0.0.1:<port>")` sends GraphQL and
-  token calls to a local stub. Only loopback hosts are allowed.
-- `WebhookContext::new(...)` and `InstallContext::new(...)` build contexts
-  to call handlers directly.
+  token calls to a local stub. The plugin accepts only loopback hosts.
+- To call a handler directly, build a runtime, put it in a test state, and
+  read the handle:
+
+  ```rust,ignore
+  let runtime = LinearPlugin::new().build_runtime(LinearConfig::from_sources(None, lookup)?)?;
+  let state = AppState::for_test();
+  state.insert_extension(runtime);
+  let linear = Linear::from_state(&state)?;
+  let ctx = WebhookContext::new(DeliveryId::parse("d-1")?, signed.body, linear)?;
+  ```
+
+  `InstallContext::new(Organization::new("org-1"), "read", linear)` works
+  the same way.
 
 ## Examples
 

@@ -88,6 +88,10 @@ pub struct InstallContext {
     pub state: AppState,
     /// The plugin handle. `client_for(&org)` works at once.
     pub linear: Linear,
+    /// The callback request headers. Read your session cookie here to bind
+    /// the workspace to your user. Never trust the `organization` query
+    /// value on the page after the install: anyone can type it.
+    pub headers: autumn_web::reexports::http::HeaderMap,
 }
 
 impl InstallContext {
@@ -99,6 +103,7 @@ impl InstallContext {
             scope: scope.into(),
             state: linear.state().clone(),
             linear,
+            headers: autumn_web::reexports::http::HeaderMap::new(),
         }
     }
 
@@ -208,11 +213,16 @@ impl Keeper {
         if !token.needs_refresh(now_ms, REFRESH_MARGIN_MS) {
             return Ok(token);
         }
-        let backing_off = state
-            .failed_at_ms
-            .is_some_and(|at| now_ms.saturating_sub(at) < REFRESH_BACKOFF_MS);
-        if backing_off && !token.is_expired(now_ms) {
-            return Ok(token);
+        let since_failure = state.failed_at_ms.map(|at| now_ms.saturating_sub(at));
+        if let Some(elapsed) = since_failure.filter(|elapsed| *elapsed < REFRESH_BACKOFF_MS) {
+            if !token.is_expired(now_ms) {
+                return Ok(token);
+            }
+            // The token is dead and Linear failed a short time ago. Each
+            // waiting caller must not make its own slow call.
+            return Err(Error::RefreshBackoff {
+                retry_after: std::time::Duration::from_millis(REFRESH_BACKOFF_MS - elapsed),
+            });
         }
         let Some(refresh) = token.refresh_token.clone() else {
             if token.is_expired(now_ms) {
@@ -241,6 +251,9 @@ impl Keeper {
                 fresh.installed_at_ms = token.installed_at_ms;
                 if fresh.refresh_token.is_none() {
                     fresh.refresh_token = Some(refresh);
+                }
+                if fresh.scope.is_empty() {
+                    fresh.scope.clone_from(&token.scope);
                 }
                 self.tokens.put(org, fresh.clone()).await?;
                 state.failed_at_ms = None;
@@ -274,10 +287,40 @@ impl Keeper {
 
     /// Delete the token of `org` only when the store still holds `seen`.
     async fn delete_if_unchanged(&self, org: &OrganizationId, seen: &WorkspaceToken) -> Result<()> {
-        if self.tokens.get(org).await?.as_ref() == Some(seen) {
-            self.tokens.delete(org).await?;
+        self.tokens.delete_if(org, seen).await.map(|_| ())
+    }
+
+    /// Delete the token of `org` when Linear no longer accepts it. Use it
+    /// for a revoke with no stable event time. Returns `true` when the
+    /// token is gone.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transient error when the probe cannot reach Linear, so
+    /// that the webhook fails and Linear retries.
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "the per-workspace lock must cover the probe and the delete"
+    )]
+    pub(crate) async fn delete_if_dead(&self, org: &OrganizationId) -> Result<bool> {
+        let lock = self.lock_for(org)?;
+        let _guard = lock.lock().await;
+        let Some(token) = self.tokens.get(org).await? else {
+            return Ok(true);
+        };
+        let probe = LinearClient::from_parts(
+            self.http.clone(),
+            Credential::bearer(token.access_token.clone()),
+        )
+        .with_endpoint(self.graphql_url())
+        .with_retry(RetryPolicy::new(0, std::time::Duration::ZERO))
+        .viewer()
+        .await;
+        match probe {
+            Ok(_) => Ok(false),
+            Err(err) if err.is_transient() => Err(err),
+            Err(_) => self.tokens.delete_if(org, &token).await,
         }
-        Ok(())
     }
 
     /// Store the token from an install.

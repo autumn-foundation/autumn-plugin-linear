@@ -5,7 +5,6 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use autumn_web::AutumnError;
 use serde_json::{Value, json};
@@ -367,26 +366,51 @@ async fn a_panic_is_500_and_releases_the_claim() {
 
 #[tokio::test]
 async fn a_dropped_request_does_not_stop_the_handler() {
-    let done = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let finished = Arc::new(tokio::sync::Notify::new());
     let plugin = LinearPlugin::new().on("Issue", {
-        let done = Arc::clone(&done);
+        let (started, release, finished) = (
+            Arc::clone(&started),
+            Arc::clone(&release),
+            Arc::clone(&finished),
+        );
         move |_ctx: WebhookContext| {
-            let done = Arc::clone(&done);
+            let (started, release, finished) = (
+                Arc::clone(&started),
+                Arc::clone(&release),
+                Arc::clone(&finished),
+            );
             async move {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                done.fetch_add(1, Ordering::SeqCst);
+                started.notify_one();
+                release.notified().await;
+                finished.notify_one();
                 Ok(())
             }
         }
     });
     let state = setup(&plugin);
     let signed = issue("create").sign(SECRET, "d-22");
-    let _ = tokio::time::timeout(Duration::from_millis(10), send(&state, &signed)).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(done.load(Ordering::SeqCst), 1);
-    // The claim is done: a retry is a duplicate.
-    send(&state, &signed).await.assert_status(200);
-    assert_eq!(done.load(Ordering::SeqCst), 1);
+    let request = tokio::spawn({
+        let (state, signed) = (state.clone(), signed.clone());
+        async move { send(&state, &signed).await }
+    });
+    started.notified().await;
+    // The caller goes away while the handler runs.
+    request.abort();
+    let _ = request.await;
+    release.notify_one();
+    finished.notified().await;
+    // The claim settles after the handler: a retry is then a duplicate.
+    let mut status = 0;
+    for _ in 0..100 {
+        status = send(&state, &signed).await.status.as_u16();
+        if status == 200 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(status, 200);
 }
 
 struct FailingStore;
@@ -472,7 +496,7 @@ async fn a_revoke_keeps_a_token_from_a_later_install() {
     let state = setup(&LinearPlugin::new());
     install_token(&state, NOW_MS + 1).await;
     let revoke = EventFixture::new("OAuthApp", "revoked", ORG)
-        .field("createdAt", json!("bad time"))
+        .field("createdAt", json!("2026-10-26T07:33:20.000Z"))
         .at_ms(NOW_MS);
     send(&state, &revoke.sign(SECRET, "d-26"))
         .await
@@ -565,4 +589,117 @@ async fn a_context_built_in_a_test_reaches_the_client() {
     assert!(ctx.client().await.is_ok(), "API-key mode gives a client");
     let linear = crate::plugin::Linear::from_state(&state).expect("handle");
     assert!(WebhookContext::new(DeliveryId::parse("t-2").expect("id"), "nope", linear).is_err());
+}
+
+/// A revoke with no `createdAt` has no stable time: the plugin asks Linear
+/// whether the token still works, and keeps a working one.
+#[tokio::test]
+async fn a_revoke_without_a_time_keeps_a_working_token() {
+    let stub = crate::test_support::Stub::data(&[json!({"viewer": {"id": "u1"}})]).await;
+    let runtime = LinearPlugin::new()
+        .api_base_url(stub.base_url.clone())
+        .build_runtime(config(Some(OAUTH_TOML), &[]))
+        .expect("runtime");
+    let state = state(Some(runtime));
+    install_token(&state, NOW_MS - 1_000).await;
+    let mut body = EventFixture::new("OAuthApp", "revoked", ORG)
+        .at_ms(NOW_MS)
+        .to_json();
+    body.as_object_mut().expect("object").remove("createdAt");
+    let signed = SignedEvent::new(
+        SECRET,
+        body.to_string().into_bytes(),
+        "d-27",
+        "OAuthApp",
+        NOW_MS,
+    );
+    send(&state, &signed).await.assert_status(200);
+    assert!(stored(&state).await.is_some(), "a working token stays");
+    assert_eq!(
+        stub.requests()[0].header("authorization"),
+        Some("Bearer at")
+    );
+}
+
+#[tokio::test]
+async fn a_revoke_without_a_time_deletes_a_dead_token() {
+    let stub = crate::test_support::Stub::start(vec![crate::test_support::StubResponse::json(
+        401,
+        &json!({"errors": [{"message": "Authentication required"}]}),
+    )])
+    .await;
+    let runtime = LinearPlugin::new()
+        .api_base_url(stub.base_url.clone())
+        .build_runtime(config(Some(OAUTH_TOML), &[]))
+        .expect("runtime");
+    let state = state(Some(runtime));
+    install_token(&state, NOW_MS - 1_000).await;
+    let mut body = EventFixture::new("OAuthApp", "revoked", ORG)
+        .at_ms(NOW_MS)
+        .to_json();
+    body.as_object_mut().expect("object").remove("createdAt");
+    let signed = SignedEvent::new(
+        SECRET,
+        body.to_string().into_bytes(),
+        "d-28",
+        "OAuthApp",
+        NOW_MS,
+    );
+    send(&state, &signed).await.assert_status(200);
+    assert!(stored(&state).await.is_none(), "a dead token goes");
+}
+
+/// A revoke for another OAuth app is not ours: the token stays.
+#[tokio::test]
+async fn a_revoke_for_another_client_keeps_the_token() {
+    let runtime = LinearPlugin::new()
+        .build_runtime(config(Some(OAUTH_TOML), &[]))
+        .expect("runtime");
+    let state = state(Some(runtime));
+    install_token(&state, NOW_MS - 3_600_000).await;
+    let revoke = EventFixture::new("OAuthApp", "revoked", ORG)
+        .field("oauthClientId", json!("someone-else"))
+        .field("createdAt", json!("2026-10-26T07:33:20.000Z"))
+        .at_ms(NOW_MS);
+    send(&state, &revoke.sign(SECRET, "d-29"))
+        .await
+        .assert_status(200);
+    assert!(stored(&state).await.is_some());
+}
+
+/// The revoke cleanup runs before the handler, so the handler sees no token.
+#[tokio::test]
+async fn the_revoke_handler_sees_no_token() {
+    let saw: Arc<Mutex<Vec<bool>>> = Arc::default();
+    let plugin = LinearPlugin::new().on("OAuthApp", {
+        let saw = Arc::clone(&saw);
+        move |ctx: WebhookContext| {
+            let saw = Arc::clone(&saw);
+            async move {
+                let present = ctx
+                    .linear
+                    .runtime()
+                    .token_store()
+                    .get(&ctx.event.organization_id)
+                    .await
+                    .map_err(|e| e.to_autumn_error())?
+                    .is_some();
+                saw.lock().expect("lock").push(present);
+                Ok(())
+            }
+        }
+    });
+    let runtime = plugin
+        .build_runtime(config(Some(OAUTH_TOML), &[]))
+        .expect("runtime");
+    let state = state(Some(runtime));
+    install_token(&state, NOW_MS - 3_600_000).await;
+    let revoke = EventFixture::new("OAuthApp", "revoked", ORG)
+        .field("oauthClientId", json!("client-id"))
+        .field("createdAt", json!("2026-10-26T07:33:20.000Z"))
+        .at_ms(NOW_MS);
+    send(&state, &revoke.sign(SECRET, "d-30"))
+        .await
+        .assert_status(200);
+    assert_eq!(*saw.lock().expect("lock"), vec![false]);
 }

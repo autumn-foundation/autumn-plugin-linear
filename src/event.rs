@@ -7,7 +7,7 @@
 //!
 //! The typed views ([`IssueData`], [`CommentData`],
 //! [`AgentSessionEvent`]) keep most fields optional. Linear adds fields
-//! over time, and a strict struct would refuse a valid event.
+//! over time. A strict struct refuses a valid event.
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -49,9 +49,9 @@ impl WebhookEvent {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Replay`] when `webhookTimestamp` is missing or not
-    /// a time, and [`Error::InvalidRequest`] when the body is not a JSON
-    /// object or `type`, `action`, or `organizationId` is missing or bad.
+    /// - [`Error::Replay`]: `webhookTimestamp` is missing or not a time.
+    /// - [`Error::InvalidRequest`]: the body is not a JSON object, or
+    ///   `type`, `action`, or `organizationId` is missing or bad.
     pub fn parse(body: &[u8]) -> Result<Self> {
         let raw: Value = serde_json::from_slice(body)
             .map_err(|_| Error::InvalidRequest("the webhook body is not JSON".to_owned()))?;

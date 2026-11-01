@@ -7,10 +7,12 @@
 //! Linear does not run a rate-limited call, so a retry is safe. The client
 //! retries an HTTP 429 and a `RATELIMITED` error, up to
 //! [`RetryPolicy::max_retries`], after the `Retry-After` wait. A wait
-//! longer than [`RetryPolicy::max_wait`] stops the retries: the error keeps
-//! the wait, so a job queue can run the work later. The client does not
-//! retry other failures: a second run of a mutation can change data two
-//! times. It does not follow redirects.
+//! longer than [`RetryPolicy::max_wait`] stops the retries. The error keeps
+//! the wait, so a job queue can run the work later. With no `Retry-After`,
+//! the wait comes from `X-RateLimit-Requests-Reset`.
+//!
+//! The client does not retry other failures: a second run of a mutation
+//! can change data two times. It does not follow redirects.
 
 use std::time::Duration;
 
@@ -147,8 +149,9 @@ impl LinearClient {
     }
 
     /// Send requests to `endpoint` instead of Linear. Use it for a local
-    /// stub in tests. The requests carry the credential, so use only a host
-    /// you trust.
+    /// stub in tests. The requests carry the credential: use only a host
+    /// you trust. This call has no loopback check; `LinearPlugin::api_base_url`
+    /// has one.
     #[must_use]
     pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.endpoint = endpoint.into();
@@ -192,12 +195,17 @@ impl LinearClient {
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|value| value.to_str().ok())
                 .map(ToOwned::to_owned);
+            let reset_wait = reset_wait(response.headers());
             let bytes = response.bytes().await.map_err(Error::Http)?;
             let retry_after = match parse_response(status, retry_after.as_deref(), &bytes) {
                 Err(Error::RateLimited { retry_after, .. }) => retry_after,
                 other => return other,
             };
-            let hint = retry_after.unwrap_or(Duration::from_millis(DEFAULT_RETRY_WAIT_MS));
+            // `Retry-After` first, then the reset time Linear sends in ms,
+            // then one second.
+            let hint = retry_after
+                .or(reset_wait)
+                .unwrap_or(Duration::from_millis(DEFAULT_RETRY_WAIT_MS));
             let Some(wait_ms) = crate::policy::retry_wait_ms(
                 true,
                 retries,
@@ -315,6 +323,26 @@ impl LinearClient {
         self.run(&ops::create_comment(input)).await
     }
 
+    /// Create the comment only when no comment has its id. Returns the
+    /// comment and `true` when this call created it.
+    ///
+    /// Use it with [`CommentCreate::with_stable_id`]: a retry of the same
+    /// work finds the earlier comment and posts nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidRequest`] when the input has no id, and the
+    /// errors of [`run`](Self::run).
+    pub async fn create_comment_once(&self, input: &CommentCreate) -> Result<(Comment, bool)> {
+        let id = input.id.as_deref().ok_or_else(|| {
+            Error::InvalidRequest("create_comment_once needs a client id".to_owned())
+        })?;
+        if let Some(found) = self.find_comment(id).await? {
+            return Ok((found, false));
+        }
+        Ok((self.create_comment(input).await?, true))
+    }
+
     /// Find a comment by id. `None` when it does not exist.
     ///
     /// # Errors
@@ -337,6 +365,24 @@ impl LinearClient {
     ) -> Result<String> {
         let created: Created = self
             .run(&ops::create_agent_activity(session_id, content, None))
+            .await?;
+        Ok(created.id)
+    }
+
+    /// Send an agent activity with a client id (UUID v4 format). A retry
+    /// with the same id cannot post a second activity.
+    ///
+    /// # Errors
+    ///
+    /// See [`run`](Self::run).
+    pub async fn create_agent_activity_with_id(
+        &self,
+        session_id: &str,
+        content: &ActivityContent,
+        id: &str,
+    ) -> Result<String> {
+        let created: Created = self
+            .run(&ops::create_agent_activity(session_id, content, Some(id)))
             .await?;
         Ok(created.id)
     }
@@ -378,6 +424,22 @@ impl LinearClient {
     }
 }
 
+/// The wait until `X-RateLimit-Requests-Reset` (UTC epoch ms), if sent.
+fn reset_wait(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let reset_ms: u64 = headers
+        .get("x-ratelimit-requests-reset")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(millis)?;
+    Some(Duration::from_millis(reset_ms.saturating_sub(now_ms)))
+}
+
 /// A duration in whole ms, saturated to `u64`.
 fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
@@ -389,8 +451,8 @@ fn millis(duration: Duration) -> u64 {
 ///
 /// Returns [`Error::Http`] when the client does not build.
 pub(crate) fn http_client() -> Result<reqwest::Client> {
-    // No redirects: a redirect would carry the token or the client secret
-    // to another host.
+    // No redirects: a redirect can carry the token or the client secret to
+    // another host.
     reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())

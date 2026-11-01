@@ -42,7 +42,10 @@ pub const MAX_ERROR_BODY_CHARS: usize = 500;
 pub const RATE_LIMITED_CODE: &str = "RATELIMITED";
 
 /// One GraphQL operation, ready to send.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `Debug` shows the variable names, not the values: an input can carry a
+/// webhook secret.
+#[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Operation {
     /// The query or mutation text.
@@ -55,6 +58,21 @@ pub struct Operation {
     pub payload_field: Option<&'static str>,
     /// True for a built-in mutation: its payload must have `success: true`.
     checks_success: bool,
+}
+
+impl std::fmt::Debug for Operation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<&String> = self
+            .variables
+            .as_object()
+            .map(|vars| vars.keys().collect())
+            .unwrap_or_default();
+        f.debug_struct("Operation")
+            .field("root", &self.root)
+            .field("query", &self.query)
+            .field("variables", &names)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Operation {
@@ -138,12 +156,19 @@ pub fn parse_response(status: u16, retry_after: Option<&str>, body: &[u8]) -> Re
         .and_then(|value| value.get("errors"))
         .and_then(Value::as_array)
         .filter(|errors| !errors.is_empty());
+    // A rate-limit code next to data means the call ran: do not retry it.
+    let has_data = parsed
+        .as_ref()
+        .and_then(|value| value.get("data"))
+        .is_some_and(|data| !data.is_null());
     let rate_limited = status == 429
-        || errors.is_some_and(|errors| {
-            errors.iter().any(|error| {
-                error.pointer("/extensions/code").and_then(Value::as_str) == Some(RATE_LIMITED_CODE)
-            })
-        });
+        || !has_data
+            && errors.is_some_and(|errors| {
+                errors.iter().any(|error| {
+                    error.pointer("/extensions/code").and_then(Value::as_str)
+                        == Some(RATE_LIMITED_CODE)
+                })
+            });
     if rate_limited {
         return Err(Error::RateLimited {
             retries: 0,
@@ -289,6 +314,18 @@ pub struct Organization {
     pub url_key: Option<String>,
 }
 
+impl Organization {
+    /// A workspace with only an id, for example to test an install handler.
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: None,
+            url_key: None,
+        }
+    }
+}
+
 /// A short reference to a user.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[non_exhaustive]
@@ -422,6 +459,13 @@ impl IssueCreate {
             ..Self::default()
         }
     }
+
+    /// Set a client id derived from `key` with [`stable_uuid`].
+    #[must_use]
+    pub fn with_stable_id(mut self, key: &str) -> Self {
+        self.id = Some(stable_uuid(key));
+        self
+    }
 }
 
 /// The input of [`ops::update_issue`]. Unset fields do not change.
@@ -530,8 +574,8 @@ pub enum ActivityContent {
     },
 }
 
-/// The input of [`ops::create_webhook`].
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+/// The input of [`ops::create_webhook`]. `Debug` redacts the secret.
+#[derive(Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebhookCreate {
     /// The receiver URL, for example `https://app.example.com/linear/webhooks`.
@@ -550,6 +594,19 @@ pub struct WebhookCreate {
     /// The signing secret. Never log it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
+}
+
+impl std::fmt::Debug for WebhookCreate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebhookCreate")
+            .field("url", &self.url)
+            .field("resource_types", &self.resource_types)
+            .field("team_id", &self.team_id)
+            .field("all_public_teams", &self.all_public_teams)
+            .field("label", &self.label)
+            .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 // --------------------------------------------------------------- operations
@@ -596,9 +653,11 @@ pub mod ops {
     }
 
     /// One page of issues. `filter` is an `IssueFilter`, for example
-    /// `{"labels": {"name": {"eq": "intake"}}}`.
+    /// `{"labels": {"name": {"eq": "intake"}}}`. GraphQL `Int` is 32-bit,
+    /// so a larger `first` becomes `i32::MAX`.
     #[must_use]
     pub fn issues(filter: &Value, first: u32, after: Option<&str>) -> Operation {
+        let first = i32::try_from(first).unwrap_or(i32::MAX);
         Operation::new(
             format!(
                 "query AutumnIssues($filter: IssueFilter, $first: Int, $after: String) {{ issues(filter: $filter, first: $first, after: $after) {{ nodes {{ {ISSUE_FIELDS} }} pageInfo {{ hasNextPage endCursor }} }} }}"

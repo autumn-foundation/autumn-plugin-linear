@@ -500,7 +500,10 @@ fn validate_local_path(path: &str) -> Result<()> {
         && !path.starts_with("//")
         && !path.contains('\\')
         && !path.contains('#')
-        && !path.chars().any(char::is_control);
+        && !path.chars().any(char::is_control)
+        && !path
+            .split(['/', '?'])
+            .any(|segment| segment == "." || segment == "..");
     if local {
         Ok(())
     } else {

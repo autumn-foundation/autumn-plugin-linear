@@ -12,7 +12,7 @@ generic `sha256=`-prefixed hex digest. Linear sends a bare hex digest in
 from now.
 
 OAuth needs a state nonce and, with PKCE, a code verifier. A server-side
-store for them breaks across replicas unless it is shared.
+store for them breaks across replicas. Only a shared store works.
 
 ## Decision
 
@@ -40,5 +40,5 @@ store for them breaks across replicas unless it is shared.
 
 - Autumn `generic` preset: rejected. It wants a prefix and has no body
   timestamp check.
-- A random verifier in the cookie: rejected. The browser would hold it.
+- A random verifier in the cookie: rejected. Then the browser holds it.
 - A server-side state store: rejected. It needs a shared store.

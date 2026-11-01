@@ -251,7 +251,11 @@ async fn an_array_scope_from_an_old_app_is_accepted() {
         .expect("get")
         .expect("stored");
     assert_eq!(token.scope, "read,write");
-    assert_eq!(token.expires_at_ms, None);
+    // Linear documents a 24 hour token. A missing `expires_in` uses it.
+    assert_eq!(
+        token.expires_at_ms,
+        Some(NOW_MS + DEFAULT_TOKEN_LIFETIME_MS)
+    );
 }
 
 #[tokio::test]
@@ -367,4 +371,54 @@ fn authorize_url_leaves_out_prompt_when_consent_is_off() {
     assert!(!url.contains("prompt="), "{url}");
     cfg.client_id = None;
     assert!(authorize_url(&cfg, "n", "c").is_err());
+}
+
+#[test]
+fn dot_segments_cannot_make_an_open_redirect() {
+    for path in [
+        "/.//evil.example.com",
+        "/..//evil.example.com",
+        "/a/..//evil.example.com",
+        "/./x",
+    ] {
+        let toml = format!("{OAUTH_TOML}\n").replace(
+            "after_install_path = \"/welcome\"",
+            &format!("after_install_path = \"{path}\""),
+        );
+        let cfg = config(Some(&toml), &[]);
+        let err = cfg.validate().expect_err("refused");
+        assert!(
+            err.to_string().contains("after_install_path"),
+            "{path}: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_install_handler_gets_the_request_headers() {
+    let stub = Stub::start(vec![token_answer(), org_answer(ORG)]).await;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let plugin = LinearPlugin::new().on_install({
+        let seen = std::sync::Arc::clone(&seen);
+        move |ctx: InstallContext| {
+            let seen = std::sync::Arc::clone(&seen);
+            async move {
+                let session = cookie_value(&ctx.headers, "app_session").map(ToOwned::to_owned);
+                *seen.lock().expect("lock") = session;
+                Ok(())
+            }
+        }
+    });
+    let state = oauth_state(plugin, Some(&stub));
+    let (_, nonce) = start_install(&state).await;
+    app(&state)
+        .get(&format!("/linear/auth/callback?code=c&state={nonce}"))
+        .header(
+            "cookie",
+            &format!("app_session=s-1; {STATE_COOKIE}={nonce}"),
+        )
+        .send()
+        .await
+        .assert_status(302);
+    assert_eq!(seen.lock().expect("lock").as_deref(), Some("s-1"));
 }

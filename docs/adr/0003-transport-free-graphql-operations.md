@@ -14,11 +14,11 @@ rules.
 
 `graphql` holds the operations and the parser, with no IO:
 
-- `ops::*` returns an `Operation` (`query`, `variables`, `name`). It
-  serializes to the GraphQL request body.
-- `parse_response(status, retry_after, body)` returns typed data, an
+- `ops::*` returns an `Operation` (`query`, `variables`, `root`).
+  `Operation::body` gives the GraphQL request body.
+- `parse_response(status, retry_after, body)` returns the `data` value, an
   `Error::GraphQl`, an `Error::LinearApi`, or `Error::RateLimited` with
-  the wait.
+  the wait. `Operation::extract` reads the typed result from `data`.
 
 `LinearClient` is one carrier over `reqwest`. The `intake-desk` example is
 another: camel and San Mateo carry the same `Operation`.

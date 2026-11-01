@@ -31,6 +31,9 @@ fn all() -> Vec<Error> {
         Error::Reauthorize("org".into()),
         Error::OAuthDisabled,
         Error::WebhooksDisabled,
+        Error::RefreshBackoff {
+            retry_after: Duration::from_secs(1),
+        },
         Error::Store("x".into()),
         Error::MissingRuntime,
     ];
@@ -56,7 +59,7 @@ fn each_kind_maps_to_its_documented_status() {
         | ErrorKind::LinearApi
         | ErrorKind::GraphQl
         | ErrorKind::UnexpectedResponse => 502,
-        ErrorKind::RateLimited | ErrorKind::MissingRuntime => 503,
+        ErrorKind::RateLimited | ErrorKind::RefreshBackoff | ErrorKind::MissingRuntime => 503,
         _ => 500,
     };
     for err in all() {
@@ -85,7 +88,10 @@ fn transient_errors_are_rate_limits_5xx_and_in_flight() {
     for (kind, transient) in names.iter().zip(transient) {
         let want = matches!(
             kind,
-            ErrorKind::RateLimited | ErrorKind::LinearApi | ErrorKind::InProgress
+            ErrorKind::RateLimited
+                | ErrorKind::RefreshBackoff
+                | ErrorKind::LinearApi
+                | ErrorKind::InProgress
         );
         assert_eq!(transient, want, "{kind:?}");
     }

@@ -71,10 +71,15 @@ pub use config::LinearConfig;
 pub use delivery::{Claim, DeliveryStore, InMemoryDeliveryStore};
 pub use error::{Error, ErrorKind, Result};
 pub use event::{AgentSessionEvent, CommentData, IssueData, WebhookEvent};
-pub use graphql::{ActivityContent, CommentCreate, IssueCreate, IssueUpdate, Operation, ops};
+pub use graphql::{
+    ActivityContent, Comment, CommentCreate, Connection, Issue, IssueCreate, IssueUpdate,
+    Operation, Organization, WebhookCreate, ops, parse_response, stable_uuid,
+};
 pub use health::LinearHealth;
 pub use plugin::{InstallContext, Linear, LinearPlugin, LinearRuntime};
 pub use tokens::{InMemoryTokenStore, TokenStore, WorkspaceToken};
 pub use types::{Action, Actor, DeliveryId, EventType, OrganizationId};
 pub use verify::{SecretSet, sign, verify_signature};
-pub use webhooks::{VerifiedWebhook, WebhookContext, WebhookOutcome, WebhookRegistry};
+pub use webhooks::{
+    IntoWebhookHandler, VerifiedWebhook, WebhookContext, WebhookOutcome, WebhookRegistry, process,
+};

@@ -28,7 +28,7 @@ All gates pass before a push. `Cargo.lock` is committed (both workspaces).
 | `policy` | Pure decisions: replay window, refresh, retry, claim state | none |
 | `verify` | `SecretSet`, hex HMAC | `hmac`, `sha2`, `hex` |
 | `event` | `WebhookEvent`, typed views | `types` |
-| `config` | `LinearConfig`: `[linear]` + `LINEAR_*` | `types`, `verify`, `client` |
+| `config` | `LinearConfig`: `[linear]` + `LINEAR_*` | `types`, `verify`, `client`, `policy`, `oauth` |
 | `tokens` | `WorkspaceToken`, `TokenStore`, `InMemoryTokenStore` | `policy` |
 | `delivery` | `DeliveryStore`, `InMemoryDeliveryStore` | `policy` |
 | `graphql` | `Operation`, `ops`, `parse_response`, typed nodes | `error` |
@@ -37,14 +37,17 @@ All gates pass before a push. `Cargo.lock` is committed (both workspaces).
 | `oauth` | Install and callback routes, exchange, refresh, PKCE | `plugin`, `client` |
 | `health` | `LinearHealth` | `client` |
 | `plugin` | `LinearPlugin`, `LinearRuntime`, `Keeper`, `Linear`, `InstallContext`, `mount` | all above |
-| `testing` | `EventFixture`, `SignedEvent` | `verify` |
+| `testing` | `EventFixture`, `SignedEvent` | `verify`, `webhooks` |
 
-Webhook flow: Linear `POST`s `/linear/webhooks` → `VerifiedWebhook`
-checks the HMAC on raw bytes (401), parses the envelope (400), checks the
-signed `webhookTimestamp` (401), reads `Linear-Delivery` (400) → `process`
-claims the delivery (done: 200, in flight: 409) → a spawned task deletes
-the token on `OAuthApp` `revoked` and runs the handler → `complete` on
-success, `release` on an error or a panic.
+Webhook flow:
+
+1. Linear `POST`s `/linear/webhooks`.
+2. `VerifiedWebhook` checks the HMAC on raw bytes (401).
+3. It parses the envelope (400) and checks the signed `webhookTimestamp` (401).
+4. It reads `Linear-Delivery` (400).
+5. `process` claims the delivery. Done gives 200. In flight gives 409.
+6. A spawned task runs the revoke cleanup on `OAuthApp` `revoked`, then the handler.
+7. Success calls `complete`. An error or a panic calls `release`.
 
 ## Rules
 

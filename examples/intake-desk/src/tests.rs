@@ -111,8 +111,10 @@ async fn an_existing_receipt_is_not_posted_again() {
     let err = run(&url, &scenario).await.expect_err("the check sees no new receipt");
     let err = err.to_string();
     assert!(err.starts_with("check failed:"), "{err}");
-    assert!(err.contains(r#""receipt_created":false"#), "{err}");
-    assert!(!err.contains("AutumnCommentCreate"), "{err}");
+    // The message is "the summary {actual} is not {expected}".
+    let actual = err.split(" is not ").next().unwrap_or_default();
+    assert!(actual.contains(r#""receipt_created":false"#), "{err}");
+    assert!(!actual.contains("AutumnCommentCreate"), "{err}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -142,8 +144,9 @@ async fn a_rate_limit_is_retried_by_harvest() {
     let err = err.to_string();
     // The workflow succeeds. The check sees the extra issue call.
     assert!(err.starts_with("check failed:"), "{err}");
-    assert!(err.contains(r#""receipt_created":true"#), "{err}");
-    assert!(err.contains(r#"["AutumnIssue","AutumnIssue","AutumnFindComment""#), "{err}");
+    let actual = err.split(" is not ").next().unwrap_or_default();
+    assert!(actual.contains(r#""receipt_created":true"#), "{err}");
+    assert!(actual.contains(r#"["AutumnIssue","AutumnIssue","AutumnFindComment""#), "{err}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
