@@ -378,9 +378,8 @@ pub struct Created {
 // ------------------------------------------------------------------ inputs
 
 /// The input of [`ops::create_issue`].
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[non_exhaustive]
 pub struct IssueCreate {
     /// The team id. Required.
     pub team_id: String,
@@ -426,9 +425,8 @@ impl IssueCreate {
 }
 
 /// The input of [`ops::update_issue`]. Unset fields do not change.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[non_exhaustive]
 pub struct IssueUpdate {
     /// The title.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -459,7 +457,6 @@ pub struct IssueUpdate {
 /// The input of [`ops::create_comment`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[non_exhaustive]
 pub struct CommentCreate {
     /// The issue id.
     pub issue_id: String,
@@ -536,7 +533,6 @@ pub enum ActivityContent {
 /// The input of [`ops::create_webhook`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[non_exhaustive]
 pub struct WebhookCreate {
     /// The receiver URL, for example `https://app.example.com/linear/webhooks`.
     pub url: String,
