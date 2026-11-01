@@ -3,9 +3,8 @@
 Each row names an AC from `docs/planning.md` and its evidence. Test names
 are in `src/<module>/tests.rs` (`module::test`). `intake::` tests are in
 `examples/intake-desk/src/tests.rs` and run against Postgres. `triage::`
-tests are in `examples/triage_app.rs`. Status on 2026-11-01: 48 of 49 met
-with local evidence. AC-49 is met in code. Its Verus run is a CI job,
-and that job has not run yet (see "Gaps").
+tests are in `examples/triage_app.rs`. Status on 2026-11-01: all 49 met.
+AC-49 has its evidence in CI: the `verus` job verified the spec on PR #1.
 
 ## Config
 
@@ -99,7 +98,7 @@ and that job has not run yet (see "Gaps").
 | AC-46 | fmt, clippy pedantic + nursery `-D warnings`, MSRV 1.88 | Local runs of `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings` (stable 1.97 and 1.88), the same for `examples/intake-desk`; CI jobs `check`, `msrv`, `intake-desk` |
 | AC-47 | Line coverage ≥ 85 % | `cargo llvm-cov --summary-only`: 96.82 % lines, 95.74 % regions, 94.81 % functions; CI job `coverage` (`--fail-under-lines 85`) |
 | AC-48 | Docs in ASD-STE100; `missing_docs` clean | README, CLAUDE.md, CHANGELOG, `docs/planning.md`, 4 ADRs, `docs/tdd-log.md`; `cargo doc --no-deps` gives no warnings; `missing_docs = "warn"` with `-D warnings` in clippy |
-| AC-49 | Verus spec, drift test, CI job | `verus/policy.rs` (6 exec functions with `ensures`, 16 lemmas); `policy::verus_bodies_match` (bodies and the 6 constants); CI job `verus` (pinned Verus build, z3 4.16) |
+| AC-49 | Verus spec, drift test, CI job | `verus/policy.rs` (6 exec functions with `ensures`, 16 lemmas); `policy::verus_bodies_match` (bodies and the 6 constants); CI job `verus` (pinned Verus build, z3 4.16) passed on head `aa99c3b` of PR #1 |
 
 ## Review findings and how each was closed
 
@@ -134,11 +133,10 @@ has a test written first (batch 5 in `docs/tdd-log.md`).
 
 ## Gaps
 
-- **AC-49, Verus run.** The proofs have not run on this machine: the
-  build of Verus from source was not allowed here. The CI job `verus`
-  builds the same pinned Verus as san-mateo and runs `verus
-  verus/policy.rs`. The drift test and the property tests run locally.
-  If the CI job finds a syntax or proof issue, fix it in a follow-up.
+- **Verus on a dev machine.** The local build of Verus from source was
+  not allowed in the build environment, so the proofs ran only in CI
+  (job `verus`, green). Run `verus verus/policy.rs` locally with the
+  pinned build in `.github/workflows/ci.yml`.
 - **Not in the example, by choice.** Harvest drops `Retry-After` between
   camel and the activity. The connector dead-letter sink needs the
   harvest plugin migrations. A FAILED run needs a reconciler or the
