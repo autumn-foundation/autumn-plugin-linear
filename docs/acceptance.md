@@ -2,7 +2,8 @@
 
 Each row names an AC from `docs/planning.md` and its evidence. Test names
 are in `src/<module>/tests.rs` (`module::test`). `intake::` tests are in
-`examples/intake-desk/src/tests.rs` and run against Postgres. `triage::`
+`examples/intake-desk/src/<module>/tests.rs`; the scenario tests run
+against Postgres and a wiremock Linear API. `triage::`
 tests are in `examples/triage_app.rs`. Status on 2026-11-01: all 49 met.
 AC-49 has its evidence in CI: the `verus` job verified the spec on PR #1.
 

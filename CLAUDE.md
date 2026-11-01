@@ -71,6 +71,11 @@ Webhook flow:
 - Plugin routes carry `#[public]`. Test the classification.
 - Unit tests live in `src/<module>/tests.rs`. Network tests use
   `test_support::Stub`. No test needs Linear.
+- `examples/intake-desk` has one module per part (`webhook`, `camel`,
+  `harvest`, `workflow`, `triage`, `auth`, `mock_linear`, `scenario`).
+  `main.rs` keeps the whole flow in one place: the diagram, the module
+  table, and `run`. Its Linear API is wiremock; San Mateo calls it over
+  real HTTP.
 - Docs and comments in ASD-STE100 style: short sentences, active voice,
   simple present tense. `missing_docs` warns.
 - `SUPPORTED_AUTUMN_WEB` in `src/plugin.rs` equals the `autumn-web`

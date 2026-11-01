@@ -278,7 +278,7 @@ use `?` to change an `Error` into an `AutumnError`: Autumn's blanket
 | Example | Shows | Run |
 |---|---|---|
 | `examples/triage_app.rs` | The plugin alone: a handler that sets a priority and posts one comment. | `cargo run --example triage_app` |
-| `examples/intake-desk` | The ecosystem: plugin → camel → harvest workflow (one per issue) → camel → San Mateo → Linear. Self-checking. Needs Postgres. | `DATABASE_URL=... cargo run --locked --manifest-path examples/intake-desk/Cargo.toml` |
+| `examples/intake-desk` | The ecosystem: plugin → camel → harvest workflow (one per issue) → camel → San Mateo → Linear (wiremock, over real HTTP). One module per part; `main.rs` shows the whole flow. Self-checking. Needs Postgres. | `DATABASE_URL=... cargo run --locked --manifest-path examples/intake-desk/Cargo.toml` |
 
 ## Crate layout
 
