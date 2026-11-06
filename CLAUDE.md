@@ -51,6 +51,8 @@ Webhook flow:
 
 ## Rules
 
+- README Rust snippets are doctests. Make them compile; use `no_run`, not `ignore`.
+  `tests/doc_snippets.rs` checks the TOML snippets and the version pins in the docs.
 - Secrets travel only through `LINEAR_WEBHOOK_SECRET`,
   `LINEAR_WEBHOOK_SECRET_PREVIOUS`, `LINEAR_CLIENT_SECRET`,
   `LINEAR_API_KEY` (or the `env_lookup` closure). Never in `autumn.toml`,
