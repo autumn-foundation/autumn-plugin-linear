@@ -1,12 +1,12 @@
 # The intake-desk example: the whole ecosystem in one run. It is a separate
 # workspace (docs/adr/0004-ecosystem-example-workspace.md): harvest-camel
-# turns on the autumn-web default features (libpq, SQLite) and needs Rust
-# 1.89. The plugin keeps no default features and MSRV 1.88.
+# turns on the autumn-web default features (libpq, SQLite). The plugin keeps
+# no default features.
 [package]
 name = "autumn-plugin-linear-example-intake-desk"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.97"
 license = "Apache-2.0"
 publish = false
 
@@ -18,10 +18,10 @@ path = "src/main.rs"
 
 [dependencies]
 autumn-plugin-linear = { path = "../.." }
-autumn-web = "0.9"
-autumn-harvest = "0.8.0"
-autumn-harvest-plugin = { version = "0.8.0", features = ["connectors"] }
-harvest-camel = "0.2.0"
+autumn-web = "0.10"
+autumn-harvest = "0.10.0"
+autumn-harvest-plugin = { version = "0.10.0", features = ["connectors"] }
+harvest-camel = "0.3.0"
 camel-api = "0.57"
 camel-builder = "0.57"
 camel-component-direct = "0.57"
@@ -46,3 +46,8 @@ unwrap_used = "warn"
 expect_used = "warn"
 redundant_pub_crate = "allow"
 module_name_repetitions = "allow"
+
+# harvest-camel 0.3 (on autumn-harvest 0.10) is not on crates.io yet.
+# Remove this patch after the release.
+[patch.crates-io]
+harvest-camel = { git = "https://github.com/autumn-foundation/harvest-camel", branch = "claude/project-thread-8btuvj" }

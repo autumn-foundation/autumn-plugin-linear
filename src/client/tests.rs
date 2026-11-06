@@ -123,7 +123,7 @@ async fn a_wait_longer_than_the_cap_stops_at_once() {
         .await
         .expect_err("limited");
     assert!(
-        matches!(err, Error::RateLimited { retries: 0, retry_after: Some(d) } if d == Duration::from_secs(3600)),
+        matches!(err, Error::RateLimited { retries: 0, retry_after: Some(d) } if d == Duration::from_hours(1)),
         "{err:?}"
     );
     assert!(started.elapsed() < Duration::from_secs(2));

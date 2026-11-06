@@ -14,7 +14,7 @@ Build Linear apps on [Autumn](https://autumn-web.app). The plugin adds:
 # Cargo.toml
 [dependencies]
 autumn-plugin-linear = { git = "https://github.com/autumn-foundation/autumn-plugin-linear" }
-autumn-web = "0.9"
+autumn-web = "0.10"
 tracing = "0.1"
 ```
 
