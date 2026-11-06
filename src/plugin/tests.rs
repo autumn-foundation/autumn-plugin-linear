@@ -29,7 +29,7 @@ fn the_plugin_name_and_contract_are_stable() {
     assert_eq!(plugin.name(), "autumn-plugin-linear");
     let contract = plugin.contract().expect("contract");
     let text = format!("{contract:?}");
-    assert!(text.contains("0.9"), "{text}");
+    assert!(text.contains("0.10"), "{text}");
     assert!(text.contains(env!("CARGO_PKG_VERSION")), "{text}");
 }
 

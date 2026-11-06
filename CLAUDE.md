@@ -8,7 +8,7 @@ cargo fmt --all -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 cargo test --locked --doc
-cargo +1.88 clippy --locked --all-targets --all-features -- -D warnings   # MSRV
+cargo +1.97 clippy --locked --all-targets --all-features -- -D warnings   # MSRV
 cargo llvm-cov --summary-only                                            # keep >= 85 % lines
 verus verus/policy.rs                                                    # CI job `verus`
 # The ecosystem example is its own workspace (ADR 0004). It needs Postgres.

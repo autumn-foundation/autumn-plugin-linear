@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-06
+
+### Changed
+
+- **Breaking:** Support `autumn-web` 0.10. The plugin now needs `autumn-web`
+  0.10 and Rust 1.97. Apps on `autumn-web` 0.9 stay on 0.1.0.
+- The `intake-desk` example moves to autumn-harvest 0.10 and harvest-camel
+  0.3.
+
+## [0.1.0] - 2026-11-02
+
 ### Added
 
 - `LinearPlugin`: signed webhooks at `POST /linear/webhooks`, routed by
