@@ -23,7 +23,7 @@ export LINEAR_WEBHOOK_SECRET="<webhook signing secret>"
 export LINEAR_API_KEY="lin_api_..."        # one workspace
 ```
 
-```rust
+```rust,no_run
 use autumn_plugin_linear::{LinearPlugin, WebhookContext};
 use autumn_web::prelude::*;
 
@@ -63,10 +63,17 @@ answers 404 when `LINEAR_WEBHOOK_SECRET` is not set.
 ## Handlers
 
 ```rust
-LinearPlugin::new()
+use autumn_plugin_linear::{LinearPlugin, WebhookContext};
+use autumn_web::AutumnResult;
+
+async fn on_new_issue(_ctx: WebhookContext) -> AutumnResult<()> { Ok(()) }
+async fn on_comment(_ctx: WebhookContext) -> AutumnResult<()> { Ok(()) }
+async fn on_agent_session(_ctx: WebhookContext) -> AutumnResult<()> { Ok(()) }
+
+let plugin = LinearPlugin::new()
     .on_action("Issue", "create", on_new_issue)   // one action
     .on("Comment", on_comment)                     // every action of a type
-    .on("AgentSessionEvent", on_agent_session)     // agent sessions
+    .on("AgentSessionEvent", on_agent_session);    // agent sessions
 ```
 
 The `(type, action)` handler wins over the `type` handler. A malformed or
@@ -92,16 +99,20 @@ For agents, `agent_session()` gives the session id, the issue,
 activity within 10 seconds:
 
 ```rust
-use autumn_plugin_linear::ActivityContent;
+use autumn_plugin_linear::{ActivityContent, WebhookContext};
+use autumn_web::AutumnResult;
 
-let session = ctx.event.agent_session().map_err(|e| e.to_autumn_error())?;
-if let Some(session) = session {
-    let client = ctx.client().await.map_err(|e| e.to_autumn_error())?;
-    let thought = ActivityContent::Thought { body: "On it.".into() };
-    client
-        .create_agent_activity(session.session_id(), &thought)
-        .await
-        .map_err(|e| e.to_autumn_error())?;
+async fn on_agent_session(ctx: WebhookContext) -> AutumnResult<()> {
+    let session = ctx.event.agent_session().map_err(|e| e.to_autumn_error())?;
+    if let Some(session) = session {
+        let client = ctx.client().await.map_err(|e| e.to_autumn_error())?;
+        let thought = ActivityContent::Thought { body: "On it.".into() };
+        client
+            .create_agent_activity(session.session_id(), &thought)
+            .await
+            .map_err(|e| e.to_autumn_error())?;
+    }
+    Ok(())
 }
 ```
 
@@ -157,16 +168,21 @@ replaces the stored token. Use `actor = "app"` for a bot.
 
 ```rust
 use autumn_plugin_linear::graphql::{CommentCreate, IssueUpdate};
+use autumn_plugin_linear::{Linear, OrganizationId};
+use autumn_web::AutumnResult;
 
-let client = linear.client_for(&org).await.map_err(|e| e.to_autumn_error())?;
-let issue = client.issue("ENG-123").await.map_err(|e| e.to_autumn_error())?;
-client
-    .update_issue(&issue.id, &IssueUpdate { priority: Some(2), ..IssueUpdate::default() })
-    .await
-    .map_err(|e| e.to_autumn_error())?;
-let comment = CommentCreate::new(&issue.id, "Triaged.").with_stable_id("triage:ENG-123");
-// Posts the comment only when no comment has its id.
-client.create_comment_once(&comment).await.map_err(|e| e.to_autumn_error())?;
+async fn triage(linear: Linear, org: OrganizationId) -> AutumnResult<()> {
+    let client = linear.client_for(&org).await.map_err(|e| e.to_autumn_error())?;
+    let issue = client.issue("ENG-123").await.map_err(|e| e.to_autumn_error())?;
+    client
+        .update_issue(&issue.id, &IssueUpdate { priority: Some(2), ..IssueUpdate::default() })
+        .await
+        .map_err(|e| e.to_autumn_error())?;
+    let comment = CommentCreate::new(&issue.id, "Triaged.").with_stable_id("triage:ENG-123");
+    // Posts the comment only when no comment has its id.
+    client.create_comment_once(&comment).await.map_err(|e| e.to_autumn_error())?;
+    Ok(())
+}
 ```
 
 Helpers: `viewer`, `organization`, `issue`, `issues` (one page,
@@ -262,12 +278,20 @@ use `?` to change an `Error` into an `AutumnError`: Autumn's blanket
 - To call a handler directly, build a runtime, put it in a test state, and
   read the handle:
 
-  ```rust,ignore
-  let runtime = LinearPlugin::new().build_runtime(LinearConfig::from_sources(None, lookup)?)?;
-  let state = AppState::for_test();
-  state.insert_extension(runtime);
-  let linear = Linear::from_state(&state)?;
-  let ctx = WebhookContext::new(DeliveryId::parse("d-1")?, signed.body, linear)?;
+  ```rust,no_run
+  use autumn_plugin_linear::testing::EventFixture;
+  use autumn_plugin_linear::{DeliveryId, Linear, LinearConfig, LinearPlugin, WebhookContext};
+  use autumn_web::AppState;
+
+  fn handler_context() -> autumn_plugin_linear::Result<WebhookContext> {
+      let lookup = |key: &str| (key == "LINEAR_WEBHOOK_SECRET").then(|| "s".to_owned());
+      let signed = EventFixture::new("Issue", "create", "org-1").sign("s", "d-1");
+      let runtime = LinearPlugin::new().build_runtime(LinearConfig::from_sources(None, lookup)?)?;
+      let state = AppState::for_test();
+      state.insert_extension(runtime);
+      let linear = Linear::from_state(&state)?;
+      WebhookContext::new(DeliveryId::parse("d-1")?, signed.body, linear)
+  }
   ```
 
   `InstallContext::new(Organization::new("org-1"), "read", linear)` works

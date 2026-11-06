@@ -83,3 +83,8 @@ pub use verify::{SecretSet, sign, verify_signature};
 pub use webhooks::{
     IntoWebhookHandler, VerifiedWebhook, WebhookContext, WebhookOutcome, WebhookRegistry, process,
 };
+
+/// Compiles the Rust snippets of the README as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
