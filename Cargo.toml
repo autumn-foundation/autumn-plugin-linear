@@ -1,6 +1,6 @@
 [package]
 name = "autumn-plugin-linear"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.97"
 description = "Autumn plugin: Linear apps — signed webhooks routed by type and action, OAuth install with refresh, and a rate-limit-aware GraphQL client."
@@ -13,7 +13,7 @@ exclude = [".github/", "docs/", "verus/", "examples/intake-desk/", "CLAUDE.md", 
 
 [dependencies]
 # No default features: the host app selects the Autumn features.
-autumn-web = { version = "0.10", default-features = false }
+autumn-web = { version = "0.11", default-features = false }
 base64 = "0.22"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 hex = "0.4"
@@ -31,6 +31,8 @@ tracing = "0.1"
 url = "2.5"
 
 [dev-dependencies]
+# The conformance harness needs the `plugin-conformance` feature.
+autumn-web = { version = "0.11", default-features = false, features = ["plugin-conformance"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "form"] }
 proptest = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util", "net"] }

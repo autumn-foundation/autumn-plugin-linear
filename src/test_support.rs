@@ -223,10 +223,8 @@ pub fn state(runtime: Option<LinearRuntime>) -> AppState {
 
 /// A test state at `now_ms`.
 pub fn state_at(runtime: Option<LinearRuntime>, now_ms: u64) -> AppState {
-    let now = autumn_web::reexports::chrono::DateTime::from_timestamp_millis(
-        i64::try_from(now_ms).expect("fits"),
-    )
-    .expect("valid time");
+    let now = autumn_web::time::Timestamp::from_millisecond(i64::try_from(now_ms).expect("fits"))
+        .expect("valid time");
     let state = AppState::for_test()
         .with_clock(Arc::new(FixedClock::at(now)))
         .with_entropy(Arc::new(SeededEntropy::new(7)));
