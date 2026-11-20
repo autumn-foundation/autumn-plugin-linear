@@ -53,7 +53,7 @@ use crate::webhooks::{IntoWebhookHandler, WebhookHandler, WebhookRegistry};
 
 /// The `autumn-web` range this plugin supports. Keep it equal to the
 /// `autumn-web` requirement in `Cargo.toml`.
-const SUPPORTED_AUTUMN_WEB: &str = "0.10";
+const SUPPORTED_AUTUMN_WEB: &str = "0.11";
 
 /// After a failed refresh, callers use the old token (while it is valid)
 /// for this many ms before the next try.
@@ -73,7 +73,7 @@ pub type InstallHandler = Arc<dyn Fn(InstallContext) -> InstallFuture + Send + S
 
 /// The time of the app clock in Unix ms.
 pub(crate) fn now_ms(state: &AppState) -> u64 {
-    u64::try_from(state.clock().now().timestamp_millis()).unwrap_or(0)
+    u64::try_from(state.clock().now().as_millisecond()).unwrap_or(0)
 }
 
 /// What an install handler receives. The token is already stored.

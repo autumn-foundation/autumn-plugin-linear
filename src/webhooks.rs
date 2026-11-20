@@ -471,9 +471,9 @@ async fn revoke_cleanup(runtime: &LinearRuntime, event: &WebhookEvent) -> Result
 
 /// Parse an RFC 3339 time into Unix ms.
 fn parse_time_ms(text: &str) -> Option<u64> {
-    autumn_web::reexports::chrono::DateTime::parse_from_rfc3339(text)
+    text.parse::<autumn_web::time::Timestamp>()
         .ok()
-        .and_then(|time| u64::try_from(time.timestamp_millis()).ok())
+        .and_then(|time| u64::try_from(time.as_millisecond()).ok())
 }
 
 /// True when `err` comes from the body length limit.

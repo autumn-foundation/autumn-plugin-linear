@@ -419,6 +419,8 @@ dependencies = [
 [[package]]
 name = "autumn-plugin-linear"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0edec6953b2d27e9809ecea286c213e6b4becb10039a6bd27392fae278e661b6"
 dependencies = [
  "autumn-web",
  "base64 0.22.1",
