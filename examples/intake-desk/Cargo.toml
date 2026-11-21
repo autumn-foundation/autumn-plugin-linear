@@ -17,14 +17,11 @@ name = "intake_desk"
 path = "src/main.rs"
 
 [dependencies]
-# The plugin is on autumn-web 0.11. This example also needs Harvest, which is
-# still on autumn-web 0.10. Until Harvest 0.11 is out, the example uses the
-# published 0.2 plugin. Go back to the path entry after the Harvest release.
-autumn-plugin-linear = "0.2"
-autumn-web = "0.10"
-autumn-harvest = "0.10.0"
-autumn-harvest-plugin = { version = "0.10.0", features = ["connectors"] }
-harvest-camel = "0.3.0"
+autumn-plugin-linear = { path = "../.." }
+autumn-web = "0.11"
+autumn-harvest = "0.11.0"
+autumn-harvest-plugin = { version = "0.11.0", features = ["connectors"] }
+harvest-camel = "0.5.0"
 camel-api = "0.57"
 camel-builder = "0.57"
 camel-component-direct = "0.57"
@@ -50,7 +47,7 @@ expect_used = "warn"
 redundant_pub_crate = "allow"
 module_name_repetitions = "allow"
 
-# harvest-camel 0.3 (on autumn-harvest 0.10) is not on crates.io yet.
+# harvest-camel 0.5 (on autumn-harvest 0.11) is not on crates.io yet.
 # Remove this patch after the release.
 [patch.crates-io]
-harvest-camel = { git = "https://github.com/autumn-foundation/harvest-camel", branch = "claude/project-thread-8btuvj" }
+harvest-camel = { git = "https://github.com/autumn-foundation/harvest-camel", branch = "claude/project-thread-1meeql" }

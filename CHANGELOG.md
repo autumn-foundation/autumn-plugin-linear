@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The `intake-desk` example moves to autumn-harvest 0.11 and harvest-camel
+  0.5, and builds the plugin from this repository again.
+
 ## [0.3.0] - 2026-11-20
 
 ### Changed

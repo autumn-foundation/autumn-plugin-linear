@@ -94,10 +94,10 @@ use crate::workflow::workflow_id;
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// The longest time for the scenario. CI must not hang.
-const RUN_TIMEOUT: Duration = Duration::from_secs(120);
+const RUN_TIMEOUT: Duration = Duration::from_mins(2);
 /// The longest wait for the workflow. It is shorter than the run budget,
 /// so that the normal path always stops every part.
-const WORKFLOW_TIMEOUT: Duration = Duration::from_secs(60);
+const WORKFLOW_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Run the scenario against the Postgres database at `url`, stop all
 /// parts, and check the result.
