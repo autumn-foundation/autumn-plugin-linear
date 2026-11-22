@@ -2501,7 +2501,7 @@ dependencies = [
 [[package]]
 name = "harvest-camel"
 version = "0.5.0"
-source = "git+https://github.com/autumn-foundation/harvest-camel?branch=claude%2Fproject-thread-1meeql#4c7b6d20ad7aa73529241e59036a5f8c25546f50"
+source = "git+https://github.com/autumn-foundation/harvest-camel?rev=bfdb04ffc10c1cb562518c140bf256b72f2d5bf6#bfdb04ffc10c1cb562518c140bf256b72f2d5bf6"
 dependencies = [
  "async-trait",
  "autumn-harvest",

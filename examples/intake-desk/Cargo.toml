@@ -50,4 +50,4 @@ module_name_repetitions = "allow"
 # harvest-camel 0.5 (on autumn-harvest 0.11) is not on crates.io yet.
 # Remove this patch after the release.
 [patch.crates-io]
-harvest-camel = { git = "https://github.com/autumn-foundation/harvest-camel", branch = "claude/project-thread-1meeql" }
+harvest-camel = { git = "https://github.com/autumn-foundation/harvest-camel", rev = "bfdb04ffc10c1cb562518c140bf256b72f2d5bf6" }
