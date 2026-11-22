@@ -2501,7 +2501,8 @@ dependencies = [
 [[package]]
 name = "harvest-camel"
 version = "0.5.0"
-source = "git+https://github.com/autumn-foundation/harvest-camel?rev=bfdb04ffc10c1cb562518c140bf256b72f2d5bf6#bfdb04ffc10c1cb562518c140bf256b72f2d5bf6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "caee245885e3075cd62436e65f2fba7877c6d2689ab5d319de19ad02ab69472f"
 dependencies = [
  "async-trait",
  "autumn-harvest",
